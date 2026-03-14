@@ -146,9 +146,10 @@ Each skill will:
 4. Register the chat with the correct JID format
 5. Build and verify
 
-**After all channel skills complete**, install dependencies and rebuild — channel merges may introduce new packages:
+**After all channel skills complete**, do a clean install of dependencies and rebuild — channel merges can leave node_modules in a broken state with conflicting native binaries:
 
 ```bash
+rm -rf node_modules
 npm install && npm run build
 ```
 
