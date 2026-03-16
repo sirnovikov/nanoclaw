@@ -43,7 +43,7 @@ import {
   storeMessage,
 } from './db.js';
 import { GroupQueue } from './group-queue.js';
-import { resolveGroupFolderPath } from './group-folder.js';
+import { resolveGroupFolderPath, resolveGroupIpcPath } from './group-folder.js';
 import { startIpcWatcher } from './ipc.js';
 import { findChannel, formatMessages, formatOutbound } from './router.js';
 import {
@@ -315,6 +315,7 @@ async function runAgent(
         chatJid,
         isMain,
         assistantName: ASSISTANT_NAME,
+        permissionApproval: group.containerConfig?.permissionApproval,
       },
       (proc, containerName) =>
         queue.registerProcess(chatJid, proc, containerName, group.folder),
@@ -517,6 +518,17 @@ async function main(): Promise<void> {
       isGroup?: boolean,
     ) => storeChatMetadata(chatJid, timestamp, name, channel, isGroup),
     registeredGroups: () => registeredGroups,
+    onPermissionResponse: (groupFolder: string, requestId: string, approved: boolean) => {
+      // Write the response file so the container's permission hook can read it
+      try {
+        const permDir = path.join(resolveGroupIpcPath(groupFolder), 'permissions');
+        const responsePath = path.join(permDir, `${requestId}.json.response`);
+        fs.writeFileSync(responsePath, JSON.stringify({ approved }));
+        logger.info({ groupFolder, requestId, approved }, 'Permission response written to IPC');
+      } catch (err) {
+        logger.error({ groupFolder, requestId, err }, 'Failed to write permission response');
+      }
+    },
   };
 
   // Create and connect all registered channels.
@@ -575,6 +587,16 @@ async function main(): Promise<void> {
     getAvailableGroups,
     writeGroupsSnapshot: (gf, im, ag, rj) =>
       writeGroupsSnapshot(gf, im, ag, rj),
+    onPermissionRequest: (chatJid, _groupFolder, requestId, description) => {
+      const channel = findChannel(channels, chatJid);
+      if (channel?.sendPermissionRequest) {
+        channel.sendPermissionRequest(chatJid, requestId, description).catch((err) => {
+          logger.error({ chatJid, requestId, err }, 'Failed to send permission request via channel');
+        });
+      } else {
+        logger.warn({ chatJid, requestId }, 'No channel supports sendPermissionRequest');
+      }
+    },
   });
   queue.setProcessMessagesFn(processGroupMessages);
   recoverPendingMessages();

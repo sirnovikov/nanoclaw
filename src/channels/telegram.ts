@@ -16,6 +16,7 @@ export interface TelegramChannelOpts {
   onMessage: OnInboundMessage;
   onChatMetadata: OnChatMetadata;
   registeredGroups: () => Record<string, RegisteredGroup>;
+  onPermissionResponse?: (groupFolder: string, requestId: string, approved: boolean) => void;
 }
 
 /**
@@ -159,6 +160,38 @@ export class TelegramChannel implements Channel {
       );
     });
 
+    // Handle permission approval callbacks (inline ✅/❌ buttons)
+    this.bot.on('callback_query:data', async (ctx) => {
+      const data = ctx.callbackQuery.data;
+      const match = data.match(/^(allow|deny)_([^_]+_.+)$/);
+      if (!match) return;
+
+      const [, action, requestId] = match;
+      const chatJid = `tg:${ctx.chat?.id ?? ctx.callbackQuery.message?.chat.id}`;
+      const group = this.opts.registeredGroups()[chatJid];
+
+      if (!group) {
+        logger.warn({ chatJid }, 'Permission response from unregistered chat');
+        await ctx.answerCallbackQuery({ text: 'Unknown chat — ignored.' });
+        return;
+      }
+
+      const approved = action === 'allow';
+      this.opts.onPermissionResponse?.(group.folder, requestId, approved);
+
+      const label = approved ? '✅ Approved' : '❌ Denied';
+      await ctx.answerCallbackQuery({ text: label });
+
+      // Edit the original message to remove buttons and show final decision
+      try {
+        await ctx.editMessageReplyMarkup({ reply_markup: { inline_keyboard: [] } });
+      } catch {
+        // Non-critical — ignore if message already edited or deleted
+      }
+
+      logger.info({ chatJid, requestId, approved }, 'Permission response received');
+    });
+
     // Handle non-text messages with placeholders so the agent knows something was sent
     const storeNonText = (ctx: any, placeholder: string) => {
       const chatJid = `tg:${ctx.chat.id}`;
@@ -256,6 +289,33 @@ export class TelegramChannel implements Channel {
       logger.info({ jid, length: text.length }, 'Telegram message sent');
     } catch (err) {
       logger.error({ jid, err }, 'Failed to send Telegram message');
+    }
+  }
+
+  async sendPermissionRequest(jid: string, requestId: string, description: string): Promise<void> {
+    if (!this.bot) {
+      logger.warn('Telegram bot not initialized');
+      return;
+    }
+
+    try {
+      const numericId = jid.replace(/^tg:/, '');
+      await this.bot.api.sendMessage(
+        numericId,
+        `*Permission Request*\n${description}`,
+        {
+          parse_mode: 'Markdown',
+          reply_markup: {
+            inline_keyboard: [[
+              { text: '✅ Allow', callback_data: `allow_${requestId}` },
+              { text: '❌ Deny', callback_data: `deny_${requestId}` },
+            ]],
+          },
+        },
+      );
+      logger.info({ jid, requestId }, 'Permission request sent');
+    } catch (err) {
+      logger.error({ jid, requestId, err }, 'Failed to send permission request');
     }
   }
 

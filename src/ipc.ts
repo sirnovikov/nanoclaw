@@ -22,6 +22,7 @@ export interface IpcDeps {
     availableGroups: AvailableGroup[],
     registeredJids: Set<string>,
   ) => void;
+  onPermissionRequest?: (chatJid: string, groupFolder: string, requestId: string, description: string) => void;
 }
 
 let ipcWatcherRunning = false;
@@ -143,6 +144,37 @@ export function startIpcWatcher(deps: IpcDeps): void {
         }
       } catch (err) {
         logger.error({ err, sourceGroup }, 'Error reading IPC tasks directory');
+      }
+
+      // Process permission requests from this group's IPC directory.
+      // These are written by the container's PermissionRequest hook and wait
+      // for a .response file. We detect new .json requests, notify via Telegram,
+      // then rename to .notified so we don't re-send on the next poll cycle.
+      if (deps.onPermissionRequest) {
+        const permDir = path.join(ipcBaseDir, sourceGroup, 'permissions');
+        try {
+          if (fs.existsSync(permDir)) {
+            const pendingFiles = fs
+              .readdirSync(permDir)
+              .filter((f) => f.endsWith('.json'));
+            for (const file of pendingFiles) {
+              const filePath = path.join(permDir, file);
+              try {
+                const data = JSON.parse(fs.readFileSync(filePath, 'utf-8'));
+                if (data.type === 'permission_request' && data.requestId && data.chatJid && data.description) {
+                  deps.onPermissionRequest(data.chatJid, sourceGroup, data.requestId, data.description);
+                  // Rename to .notified so we don't re-send on next poll
+                  fs.renameSync(filePath, path.join(permDir, `${file}.notified`));
+                  logger.info({ sourceGroup, requestId: data.requestId }, 'Permission request forwarded');
+                }
+              } catch (err) {
+                logger.error({ file, sourceGroup, err }, 'Error processing permission request');
+              }
+            }
+          }
+        } catch (err) {
+          logger.error({ err, sourceGroup }, 'Error reading IPC permissions directory');
+        }
       }
     }
 
