@@ -9,7 +9,11 @@ import {
   TIMEZONE,
   TRIGGER_PATTERN,
 } from './config.js';
-import { startCredentialProxy } from './credential-proxy.js';
+import {
+  startCredentialProxy,
+  loadPendingProxyMessages,
+  handleProxyPermissionResponse,
+} from './credential-proxy.js';
 import './channels/index.js';
 import {
   getChannelFactory,
@@ -469,13 +473,46 @@ function ensureContainerSystemRunning(): void {
 async function main(): Promise<void> {
   ensureContainerSystemRunning();
   initDatabase();
+
+  // Ensure Docker proxy network exists for permission-approval containers
+  const { execSync } = await import('child_process');
+  try {
+    execSync('./scripts/setup-proxy-network.sh', { stdio: 'pipe' });
+  } catch (err) {
+    logger.warn(
+      { err },
+      'Failed to create nanoclaw-proxy Docker network — permission approval may not work',
+    );
+  }
   logger.info('Database initialized');
   loadState();
 
-  // Start credential proxy (containers route API calls through this)
+  // Start credential proxy (containers route API calls through this).
+  // Approval callbacks are wired after channel connect so sendPermissionRequest is available.
+  // resolveGroup returns null for now — HTTP/HTTPS permission is blocked until a mechanism
+  // to pass group context (e.g. X-Nanoclaw-Group header) is implemented.
   const proxyServer = await startCredentialProxy(
     CREDENTIAL_PROXY_PORT,
     PROXY_BIND_HOST,
+    {
+      resolveGroup: () => null,
+      sendPermissionRequest: async (req) => {
+        const channel = findChannel(channels, req.chatJid);
+        if (!channel?.sendPermissionRequest) return null;
+        return channel.sendPermissionRequest(
+          req.chatJid,
+          req.requestId,
+          req.egressType,
+          req.subject,
+          req.groupFolder,
+          req.proposal,
+        );
+      },
+      onPermissionResponse: () => {
+        // Rule persistence is handled inside handleProxyPermissionResponse
+        // which is called from channelOpts.onPermissionResponse above.
+      },
+    },
   );
 
   // Graceful shutdown handlers
@@ -518,15 +555,34 @@ async function main(): Promise<void> {
       isGroup?: boolean,
     ) => storeChatMetadata(chatJid, timestamp, name, channel, isGroup),
     registeredGroups: () => registeredGroups,
-    onPermissionResponse: (groupFolder: string, requestId: string, approved: boolean) => {
-      // Write the response file so the container's permission hook can read it
+    onPermissionResponse: (
+      groupFolder: string,
+      requestId: string,
+      decision: 'once' | 'always' | 'deny',
+    ) => {
+      // Proxy HTTP/HTTPS permission (no-op if requestId not in pending map)
+      handleProxyPermissionResponse(requestId, decision);
+
+      // MCP permission via file-based IPC — write response so container hook can read it
+      const approved = decision !== 'deny';
       try {
-        const permDir = path.join(resolveGroupIpcPath(groupFolder), 'permissions');
-        const responsePath = path.join(permDir, `${requestId}.json.response`);
+        const resDir = path.join(
+          resolveGroupIpcPath(groupFolder),
+          'permissions',
+          'responses',
+        );
+        fs.mkdirSync(resDir, { recursive: true });
+        const responsePath = path.join(resDir, `${requestId}.json`);
         fs.writeFileSync(responsePath, JSON.stringify({ approved }));
-        logger.info({ groupFolder, requestId, approved }, 'Permission response written to IPC');
+        logger.info(
+          { groupFolder, requestId, decision },
+          'Permission response written to IPC',
+        );
       } catch (err) {
-        logger.error({ groupFolder, requestId, err }, 'Failed to write permission response');
+        logger.error(
+          { groupFolder, requestId, err },
+          'Failed to write MCP permission response',
+        );
       }
     },
   };
@@ -550,6 +606,28 @@ async function main(): Promise<void> {
   if (channels.length === 0) {
     logger.fatal('No channels connected');
     process.exit(1);
+  }
+
+  // On startup, remove inline keyboards from any Telegram messages that were
+  // waiting for permission approval before the previous restart.
+  const staleMessages = loadPendingProxyMessages();
+  if (staleMessages.length > 0) {
+    logger.info(
+      { count: staleMessages.length },
+      'Clearing stale permission request keyboards',
+    );
+    for (const entry of staleMessages) {
+      const ch = findChannel(channels, entry.chatJid);
+      if (ch) {
+        try {
+          await (
+            ch as import('./channels/telegram.js').TelegramChannel
+          ).clearPermissionKeyboard(entry.chatJid, entry.messageId);
+        } catch {
+          /* non-critical */
+        }
+      }
+    }
   }
 
   // Start subsystems (independently of connection handler)
@@ -587,14 +665,39 @@ async function main(): Promise<void> {
     getAvailableGroups,
     writeGroupsSnapshot: (gf, im, ag, rj) =>
       writeGroupsSnapshot(gf, im, ag, rj),
-    onPermissionRequest: (chatJid, _groupFolder, requestId, description) => {
+    onPermissionRequest: (
+      chatJid,
+      groupFolder,
+      requestId,
+      toolName,
+      toolInput,
+    ) => {
       const channel = findChannel(channels, chatJid);
       if (channel?.sendPermissionRequest) {
-        channel.sendPermissionRequest(chatJid, requestId, description).catch((err) => {
-          logger.error({ chatJid, requestId, err }, 'Failed to send permission request via channel');
-        });
+        // Format subject display from toolName + toolInput
+        const inputStr = JSON.stringify(toolInput ?? {});
+        const subject =
+          inputStr.length > 200 ? inputStr.slice(0, 200) + '…' : inputStr;
+        channel
+          .sendPermissionRequest(
+            chatJid,
+            requestId,
+            'mcp',
+            toolName,
+            groupFolder,
+            null,
+          )
+          .catch((err) => {
+            logger.error(
+              { chatJid, requestId, err },
+              'Failed to send MCP permission request via channel',
+            );
+          });
       } else {
-        logger.warn({ chatJid, requestId }, 'No channel supports sendPermissionRequest');
+        logger.warn(
+          { chatJid, requestId },
+          'No channel supports sendPermissionRequest',
+        );
       }
     },
   });

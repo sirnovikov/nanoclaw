@@ -16,7 +16,11 @@ export interface TelegramChannelOpts {
   onMessage: OnInboundMessage;
   onChatMetadata: OnChatMetadata;
   registeredGroups: () => Record<string, RegisteredGroup>;
-  onPermissionResponse?: (groupFolder: string, requestId: string, approved: boolean) => void;
+  onPermissionResponse?: (
+    groupFolder: string,
+    requestId: string,
+    decision: 'once' | 'always' | 'deny',
+  ) => void;
 }
 
 /**
@@ -160,10 +164,11 @@ export class TelegramChannel implements Channel {
       );
     });
 
-    // Handle permission approval callbacks (inline ✅/❌ buttons)
+    // Handle permission approval callbacks (inline once/always/deny buttons)
     this.bot.on('callback_query:data', async (ctx) => {
       const data = ctx.callbackQuery.data;
-      const match = data.match(/^(allow|deny)_([^_]+_.+)$/);
+      // Format: once_<reqId> | always_<reqId> | deny_<reqId>
+      const match = data.match(/^(once|always|deny)_(.+)$/);
       if (!match) return;
 
       const [, action, requestId] = match;
@@ -176,20 +181,24 @@ export class TelegramChannel implements Channel {
         return;
       }
 
-      const approved = action === 'allow';
-      this.opts.onPermissionResponse?.(group.folder, requestId, approved);
+      const decision = action as 'once' | 'always' | 'deny';
+      this.opts.onPermissionResponse?.(group.folder, requestId, decision);
 
-      const label = approved ? '✅ Approved' : '❌ Denied';
+      const label = decision === 'deny' ? '❌ Denied' : '✅ Approved';
       await ctx.answerCallbackQuery({ text: label });
 
-      // Edit the original message to remove buttons and show final decision
       try {
-        await ctx.editMessageReplyMarkup({ reply_markup: { inline_keyboard: [] } });
+        await ctx.editMessageReplyMarkup({
+          reply_markup: { inline_keyboard: [] },
+        });
       } catch {
-        // Non-critical — ignore if message already edited or deleted
+        /* non-critical */
       }
 
-      logger.info({ chatJid, requestId, approved }, 'Permission response received');
+      logger.info(
+        { chatJid, requestId, decision },
+        'Permission response received',
+      );
     });
 
     // Handle non-text messages with placeholders so the agent knows something was sent
@@ -292,30 +301,71 @@ export class TelegramChannel implements Channel {
     }
   }
 
-  async sendPermissionRequest(jid: string, requestId: string, description: string): Promise<void> {
-    if (!this.bot) {
-      logger.warn('Telegram bot not initialized');
-      return;
-    }
+  async sendPermissionRequest(
+    jid: string,
+    requestId: string,
+    egressType: string,
+    subject: string,
+    groupFolder: string,
+    proposal: { name: string; pattern: string; scope: string } | null,
+  ): Promise<number | null> {
+    if (!this.bot) return null;
+
+    const typeLabel =
+      egressType === 'connect'
+        ? 'HTTPS connection'
+        : egressType === 'http'
+          ? 'HTTP request'
+          : 'MCP call';
+
+    const text =
+      `🔐 *Permission Request*\n\n` +
+      `Type: ${typeLabel}\n` +
+      `Host: \`${subject}\`\n\n` +
+      `Group: \`${groupFolder}\`` +
+      (proposal ? `\nRule: \`${proposal.pattern}\` (${proposal.scope})` : '');
+
+    const alwaysButton = proposal
+      ? {
+          text: `✅ Always: ${proposal.name}`,
+          callback_data: `always_${requestId}`,
+        }
+      : null;
+
+    const keyboard = [
+      [
+        { text: '✅ Once', callback_data: `once_${requestId}` },
+        ...(alwaysButton ? [alwaysButton] : []),
+        { text: '❌ Deny', callback_data: `deny_${requestId}` },
+      ],
+    ];
 
     try {
       const numericId = jid.replace(/^tg:/, '');
-      await this.bot.api.sendMessage(
-        numericId,
-        `*Permission Request*\n${description}`,
-        {
-          parse_mode: 'Markdown',
-          reply_markup: {
-            inline_keyboard: [[
-              { text: '✅ Allow', callback_data: `allow_${requestId}` },
-              { text: '❌ Deny', callback_data: `deny_${requestId}` },
-            ]],
-          },
-        },
-      );
+      const msg = await this.bot.api.sendMessage(numericId, text, {
+        parse_mode: 'Markdown',
+        reply_markup: { inline_keyboard: keyboard },
+      });
       logger.info({ jid, requestId }, 'Permission request sent');
+      return msg.message_id;
     } catch (err) {
-      logger.error({ jid, requestId, err }, 'Failed to send permission request');
+      logger.error(
+        { jid, requestId, err },
+        'Failed to send permission request',
+      );
+      return null;
+    }
+  }
+
+  async clearPermissionKeyboard(jid: string, messageId: number): Promise<void> {
+    if (!this.bot) return;
+    try {
+      const numericId = parseInt(jid.replace(/^tg:/, ''), 10);
+      await this.bot.api.editMessageReplyMarkup(numericId, messageId, {
+        reply_markup: { inline_keyboard: [] },
+      });
+    } catch {
+      /* non-critical — message may already be gone */
     }
   }
 
