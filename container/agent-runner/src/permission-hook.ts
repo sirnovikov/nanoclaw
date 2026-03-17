@@ -3,7 +3,8 @@ import path from 'path';
 
 import { HookCallback } from '@anthropic-ai/claude-agent-sdk';
 
-const PERM_DIR = '/workspace/ipc/permissions';
+const REQUESTS_DIR = '/ipc/permissions/requests';
+const RESPONSES_DIR = '/ipc/permissions/responses';
 const POLL_INTERVAL_MS = 500;
 const TIMEOUT_MS = 30 * 60 * 1000; // 30 minutes
 
@@ -12,29 +13,18 @@ interface PermissionInput {
   tool_input?: unknown;
 }
 
-function formatDescription(toolName: string, toolInput: unknown): string {
-  if (toolName === 'Bash') {
-    const cmd = (toolInput as { command?: string })?.command ?? '';
-    const display = cmd.length > 300 ? cmd.slice(0, 300) + '…' : cmd;
-    return `Bash: \`${display}\``;
-  }
-
-  if (toolName === 'Write' || toolName === 'Edit') {
-    const p = (toolInput as { file_path?: string })?.file_path ?? '';
-    return `${toolName}: \`${p}\``;
-  }
-
-  const inputStr = JSON.stringify(toolInput ?? {});
-  const display = inputStr.length > 200 ? inputStr.slice(0, 200) + '…' : inputStr;
-  return `${toolName}: \`${display}\``;
+interface PermissionRequestFile {
+  type: 'permission_request';
+  requestId: string; // "<13-digit-ms>-<6-char-random>"
+  groupFolder: string;
+  chatJid: string;
+  toolName: string; // 'mcp__nanoclaw__*'
+  toolInput: unknown; // raw JSON from SDK — host formats display from this
+  timestamp: string;
 }
 
-// Bash commands that are safe to auto-approve without Telegram confirmation.
-// These are read-only or low-risk operations inside the workspace.
-const SAFE_BASH_RE = /^\s*(ls|cat|head|tail|grep|find|pwd|echo|date|which|wc|sort|uniq|diff|file|stat|du|df|env|printenv|git\s+(log|status|diff|show|branch|remote|fetch|stash list)|node\s+--version|bun\s+--version|npm\s+list|jq\b)\b/;
-
-function isSafeBash(command: string): boolean {
-  return SAFE_BASH_RE.test(command);
+interface PermissionResponseFile {
+  approved: boolean;
 }
 
 const ALLOW = {
@@ -47,54 +37,70 @@ const ALLOW = {
 const DENY = {
   hookSpecificOutput: {
     hookEventName: 'PermissionRequest' as const,
-    decision: { behavior: 'deny' as const, message: 'Denied via Telegram' },
+    decision: { behavior: 'deny' as const, message: 'Permission denied' },
   },
 };
 
-export function createPermissionRequestHook(groupFolder: string, chatJid: string): HookCallback {
+function writeRequestFile(reqPath: string, data: PermissionRequestFile): void {
+  const fd = fs.openSync(
+    reqPath,
+    fs.constants.O_WRONLY | fs.constants.O_CREAT | fs.constants.O_EXCL,
+    0o644,
+  );
+  try {
+    fs.writeSync(fd, JSON.stringify(data));
+  } finally {
+    fs.closeSync(fd);
+  }
+  // Make immutable after write — prevents any future writes to this file
+  fs.chmodSync(reqPath, 0o444);
+}
+
+export function createPermissionRequestHook(
+  groupFolder: string,
+  chatJid: string,
+): HookCallback {
   return async (input) => {
     const perm = input as PermissionInput;
     const toolName = perm.tool_name ?? 'unknown';
-    const toolInput = perm.tool_input ?? {};
 
-    // Auto-approve safe read-only Bash commands without bothering the user
-    if (toolName === 'Bash') {
-      const cmd = (toolInput as { command?: string })?.command ?? '';
-      if (isSafeBash(cmd)) {
-        return ALLOW;
-      }
+    // Only intercept MCP calls. All other tools (Bash, Write, Edit, etc.) are
+    // governed by the container sandbox — no Telegram approval needed.
+    if (!toolName.startsWith('mcp__')) {
+      return ALLOW;
     }
 
+    const toolInput = perm.tool_input ?? {};
+
+    fs.mkdirSync(REQUESTS_DIR, { recursive: true });
+    fs.mkdirSync(RESPONSES_DIR, { recursive: true });
+
     const reqId = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
-    const reqPath = path.join(PERM_DIR, `${reqId}.json`);
-    const tmpPath = `${reqPath}.tmp`;
+    const reqPath = path.join(REQUESTS_DIR, `${reqId}.json`);
 
-    fs.mkdirSync(PERM_DIR, { recursive: true });
-
-    const requestData = {
+    const requestData: PermissionRequestFile = {
       type: 'permission_request',
       requestId: reqId,
       groupFolder,
       chatJid,
       toolName,
-      description: formatDescription(toolName, toolInput),
+      toolInput,
       timestamp: new Date().toISOString(),
     };
 
-    fs.writeFileSync(tmpPath, JSON.stringify(requestData, null, 2));
-    fs.renameSync(tmpPath, reqPath);
+    writeRequestFile(reqPath, requestData);
 
     // Poll for response file
-    const responsePath = `${reqPath}.response`;
+    const responsePath = path.join(RESPONSES_DIR, `${reqId}.json`);
     const start = Date.now();
 
     while (Date.now() - start < TIMEOUT_MS) {
       if (fs.existsSync(responsePath)) {
         try {
-          const response = JSON.parse(fs.readFileSync(responsePath, 'utf-8'));
+          const response = JSON.parse(
+            fs.readFileSync(responsePath, 'utf-8'),
+          ) as PermissionResponseFile;
           fs.unlinkSync(responsePath);
-          try { fs.unlinkSync(reqPath); } catch { /* already renamed to .notified */ }
-          try { fs.unlinkSync(`${reqPath}.notified`); } catch { /* may not exist */ }
           return response.approved ? ALLOW : DENY;
         } catch {
           // Response file not yet fully written — retry on next poll
@@ -104,9 +110,6 @@ export function createPermissionRequestHook(groupFolder: string, chatJid: string
     }
 
     // Timeout — deny by default
-    try { fs.unlinkSync(reqPath); } catch { /* already renamed */ }
-    try { fs.unlinkSync(`${reqPath}.notified`); } catch { /* may not exist */ }
     return DENY;
   };
 }
-
