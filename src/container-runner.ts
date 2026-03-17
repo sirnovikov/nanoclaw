@@ -182,6 +182,26 @@ function buildVolumeMounts(
     readonly: false,
   });
 
+  // Permission approval IPC: split mounts — requests RW (hook writes), responses RO (host writes)
+  // These are separate from /workspace/ipc so Write/Edit tools cannot reach them.
+  // Only added when permissionApproval is enabled for this group.
+  if (group.containerConfig?.permissionApproval) {
+    const reqDir = path.join(groupIpcDir, 'permissions', 'requests');
+    const resDir = path.join(groupIpcDir, 'permissions', 'responses');
+    fs.mkdirSync(reqDir, { recursive: true });
+    fs.mkdirSync(resDir, { recursive: true });
+    mounts.push({
+      hostPath: reqDir,
+      containerPath: '/ipc/permissions/requests',
+      readonly: false,
+    });
+    mounts.push({
+      hostPath: resDir,
+      containerPath: '/ipc/permissions/responses',
+      readonly: true,
+    });
+  }
+
   // Copy agent-runner source into a per-group writable location so agents
   // can customize it (add tools, change behavior) without affecting other
   // groups. Recompiled on container startup via entrypoint.sh.
@@ -222,6 +242,7 @@ function buildVolumeMounts(
 function buildContainerArgs(
   mounts: VolumeMount[],
   containerName: string,
+  permissionApproval: boolean,
 ): string[] {
   const args: string[] = ['run', '-i', '--rm', '--name', containerName];
 
@@ -283,6 +304,20 @@ function buildContainerArgs(
     `ANTHROPIC_BASE_URL=http://${CONTAINER_HOST_GATEWAY}:${CREDENTIAL_PROXY_PORT}`,
   );
 
+  // Permission approval: use nanoclaw-proxy bridge + inject proxy env vars.
+  // The nanoclaw-proxy bridge has no external routing (--internal Docker flag).
+  // All HTTP/HTTPS from the container goes through the credential proxy.
+  if (permissionApproval) {
+    args.push('--network', 'nanoclaw-proxy');
+    const proxyUrl = `http://${CONTAINER_HOST_GATEWAY}:${CREDENTIAL_PROXY_PORT}`;
+    args.push('-e', `HTTP_PROXY=${proxyUrl}`);
+    args.push('-e', `HTTPS_PROXY=${proxyUrl}`);
+    args.push('-e', `http_proxy=${proxyUrl}`);
+    args.push('-e', `https_proxy=${proxyUrl}`);
+    args.push('-e', `NO_PROXY=localhost,127.0.0.1`);
+    args.push('-e', `no_proxy=localhost,127.0.0.1`);
+  }
+
   // Mirror the host's auth method with a placeholder value.
   // API key mode: SDK sends x-api-key, proxy replaces with real key.
   // OAuth mode:   SDK exchanges placeholder token for temp API key,
@@ -334,7 +369,11 @@ export async function runContainerAgent(
   const mounts = buildVolumeMounts(group, input.isMain);
   const safeName = group.folder.replace(/[^a-zA-Z0-9-]/g, '-');
   const containerName = `nanoclaw-${safeName}-${Date.now()}`;
-  const containerArgs = buildContainerArgs(mounts, containerName);
+  const containerArgs = buildContainerArgs(
+    mounts,
+    containerName,
+    group.containerConfig?.permissionApproval ?? false,
+  );
 
   logger.debug(
     {
