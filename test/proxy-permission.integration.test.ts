@@ -114,6 +114,45 @@ describe('proxy permission integration', () => {
     await new Promise<void>((r) => server.close(() => r()));
   }, 10_000);
 
+  it('direct API request (path-only URL) is never permission-gated even with approvalCallbacks', async () => {
+    // Regression: proxy was treating direct ANTHROPIC_BASE_URL calls as external
+    // traffic because host.docker.internal != api.anthropic.com. Direct requests
+    // have a path-only URL (e.g. /v1/messages) and must always pass through.
+    const sendPermissionRequest = vi.fn().mockResolvedValue(1);
+    const resolveGroup = vi.fn().mockReturnValue({ groupFolder: 'test', chatJid: 'tg:123' });
+
+    const { server, port } = await startTestProxy({
+      resolveGroup,
+      sendPermissionRequest,
+      onPermissionResponse: vi.fn(),
+    });
+
+    const res = await new Promise<{ status: number }>((resolve) => {
+      const req = http.request(
+        {
+          host: '127.0.0.1',
+          port,
+          method: 'POST',
+          // Path-only URL — this is how ANTHROPIC_BASE_URL traffic arrives
+          path: '/v1/messages',
+          headers: { host: 'host.docker.internal:3001', 'content-type': 'application/json' },
+        },
+        (r) => {
+          r.resume();
+          resolve({ status: r.statusCode ?? 0 });
+        },
+      );
+      req.on('error', () => resolve({ status: 0 }));
+      req.end('{}');
+    });
+
+    // Must NOT have been permission-gated (no Telegram message)
+    expect(sendPermissionRequest).not.toHaveBeenCalled();
+    // 502 is fine — upstream isn't real in tests. What matters is it wasn't 403.
+    expect(res.status).not.toBe(403);
+    await new Promise<void>((r) => server.close(() => r()));
+  });
+
   it('CONNECT with always tap persists rule and allows second identical request without Telegram', async () => {
     // TODO: implement after onPermissionResponse rule persistence is wired
     expect(true).toBe(true);
