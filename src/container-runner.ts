@@ -309,6 +309,9 @@ function buildContainerArgs(
   // All HTTP/HTTPS from the container goes through the credential proxy.
   if (permissionApproval) {
     args.push('--network', 'nanoclaw-proxy');
+    // --internal networks have no gateway, so host.docker.internal won't resolve
+    // via Docker's automatic DNS. Inject it explicitly via /etc/hosts.
+    args.push('--add-host', 'host.docker.internal:host-gateway');
     const proxyUrl = `http://${CONTAINER_HOST_GATEWAY}:${CREDENTIAL_PROXY_PORT}`;
     args.push('-e', `HTTP_PROXY=${proxyUrl}`);
     args.push('-e', `HTTPS_PROXY=${proxyUrl}`);
