@@ -272,9 +272,13 @@ export function startCredentialProxy(
       req.on('end', async () => {
         const body = Buffer.concat(chunks);
 
-        // Determine target host for permission check
+        // Determine target host for permission check.
+        // Direct requests (URL starts with '/') are always Anthropic API calls
+        // routed via ANTHROPIC_BASE_URL — never subject to permission checks.
+        // HTTP proxy requests (absolute URL) may be external traffic to gate.
         const reqHost = (req.headers.host ?? '').split(':')[0];
-        const isAnthropicReq = isAnthropicHost(reqHost);
+        const isDirectApiRequest = (req.url ?? '').startsWith('/');
+        const isAnthropicReq = isDirectApiRequest || isAnthropicHost(reqHost);
 
         // Permission check for non-Anthropic HTTP traffic
         if (!isAnthropicReq && approvalCallbacks) {

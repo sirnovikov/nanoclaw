@@ -2,8 +2,10 @@
 set -euo pipefail
 
 # Create the nanoclaw-proxy Docker bridge network.
-# --internal: blocks all external routing at the kernel level (iptables).
-#             Containers can only reach host.docker.internal (host gateway).
+# Used to isolate permission-approval containers from each other while
+# allowing them to reach the host credential proxy via host.docker.internal.
+# Note: --internal is NOT used because it blocks host routing on macOS
+# Docker Desktop, preventing containers from reaching the proxy.
 # Idempotent: safe to run multiple times.
 
 NETWORK_NAME="nanoclaw-proxy"
@@ -15,7 +17,6 @@ fi
 
 docker network create \
   --driver bridge \
-  --internal \
   --opt com.docker.network.bridge.name=nanoclaw-proxy \
   "$NETWORK_NAME"
 
