@@ -30,8 +30,6 @@ export interface IpcDeps {
   ) => void;
 }
 
-let ipcWatcherRunning = false;
-
 /**
  * On startup, scan for orphaned .processing files (requests that were in-flight
  * when the host restarted). Write deny responses so containers don't hang forever.
@@ -98,14 +96,7 @@ function cleanupOrphanedPermissions(ipcBaseDir: string): void {
   }
 }
 
-export function startIpcWatcher(deps: IpcDeps): void {
-  if (ipcWatcherRunning) {
-    logger.debug('IPC watcher already running, skipping duplicate start');
-    return;
-  }
-  ipcWatcherRunning = true;
-
-  const ipcBaseDir = path.join(DATA_DIR, 'ipc');
+export function startIpcWatcher(deps: IpcDeps, ipcBaseDir = path.join(DATA_DIR, 'ipc')): void {
   fs.mkdirSync(ipcBaseDir, { recursive: true });
 
   cleanupOrphanedPermissions(ipcBaseDir);
@@ -287,11 +278,6 @@ export function startIpcWatcher(deps: IpcDeps): void {
 
   processIpcFiles();
   logger.info('IPC watcher started (per-group namespaces)');
-}
-
-/** @internal - for tests only. */
-export function _resetIpcWatcherForTests(): void {
-  ipcWatcherRunning = false;
 }
 
 export async function processTaskIpc(
