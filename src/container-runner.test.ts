@@ -127,36 +127,74 @@ describe('container-runner spawn args', () => {
     vi.useRealTimers();
   });
 
-  it('includes host.docker.internal in NO_PROXY when permissionApproval is true', async () => {
-    // Start the container (don't await — we just need to inspect spawn args)
-    const resultPromise = runContainerAgent(
-      testGroupWithPermissionApproval,
-      { ...testInput, permissionApproval: true },
-      () => {},
-    );
-
-    // Immediately emit output so the container "finishes"
-    emitOutputMarker(fakeProc, { status: 'success', result: 'ok', newSessionId: 's1' });
+  /** Run the container to completion and return the spawn args. */
+  async function spawnArgsFor(
+    group: RegisteredGroup,
+  ): Promise<string[]> {
+    vi.mocked(spawn).mockClear();
+    const resultPromise = runContainerAgent(group, testInput, () => {});
+    emitOutputMarker(fakeProc, {
+      status: 'success',
+      result: 'ok',
+      newSessionId: 's1',
+    });
     await vi.advanceTimersByTimeAsync(10);
     fakeProc.emit('close', 0);
     await vi.advanceTimersByTimeAsync(10);
     await resultPromise;
+    return vi.mocked(spawn).mock.calls[0][1] as string[];
+  }
 
-    const spawnMock = vi.mocked(spawn);
-    expect(spawnMock).toHaveBeenCalled();
-    const spawnArgs: string[] = spawnMock.mock.calls[0][1] as string[];
-
-    // Find the NO_PROXY value passed to the container
-    const noProxyIdx = spawnArgs.findIndex((a) => a === '-e') + 1;
-    const noProxyArgs = spawnArgs
-      .map((a, i) => (spawnArgs[i - 1] === '-e' ? a : null))
-      .filter(Boolean)
-      .filter((a) => a!.startsWith('NO_PROXY=') || a!.startsWith('no_proxy='));
-
-    expect(noProxyArgs.length).toBeGreaterThan(0);
-    for (const arg of noProxyArgs) {
-      expect(arg).toContain('host.docker.internal');
+  /** Pull all `-e KEY=VALUE` entries from spawn args. */
+  function envArgs(args: string[]): Record<string, string> {
+    const result: Record<string, string> = {};
+    for (let i = 0; i < args.length - 1; i++) {
+      if (args[i] === '-e') {
+        const eq = args[i + 1].indexOf('=');
+        if (eq !== -1) {
+          result[args[i + 1].slice(0, eq)] = args[i + 1].slice(eq + 1);
+        }
+      }
     }
+    return result;
+  }
+
+  it('includes host.docker.internal in NO_PROXY when permissionApproval is true', async () => {
+    const args = await spawnArgsFor(testGroupWithPermissionApproval);
+    const env = envArgs(args);
+    expect(env['NO_PROXY']).toContain('host.docker.internal');
+    expect(env['no_proxy']).toContain('host.docker.internal');
+  });
+
+  it('sets HTTP_PROXY and HTTPS_PROXY to credential proxy URL when permissionApproval is true', async () => {
+    const args = await spawnArgsFor(testGroupWithPermissionApproval);
+    const env = envArgs(args);
+    expect(env['HTTP_PROXY']).toMatch(/^http:\/\/host\.docker\.internal:\d+$/);
+    expect(env['HTTPS_PROXY']).toMatch(/^http:\/\/host\.docker\.internal:\d+$/);
+    expect(env['http_proxy']).toMatch(/^http:\/\/host\.docker\.internal:\d+$/);
+    expect(env['https_proxy']).toMatch(/^http:\/\/host\.docker\.internal:\d+$/);
+  });
+
+  it('attaches nanoclaw-proxy network when permissionApproval is true', async () => {
+    const args = await spawnArgsFor(testGroupWithPermissionApproval);
+    const networkIdx = args.indexOf('--network');
+    expect(networkIdx).not.toBe(-1);
+    expect(args[networkIdx + 1]).toBe('nanoclaw-proxy');
+  });
+
+  it('adds host.docker.internal host entry when permissionApproval is true', async () => {
+    const args = await spawnArgsFor(testGroupWithPermissionApproval);
+    const addHostIdx = args.indexOf('--add-host');
+    expect(addHostIdx).not.toBe(-1);
+    expect(args[addHostIdx + 1]).toBe('host.docker.internal:host-gateway');
+  });
+
+  it('does not set proxy env vars when permissionApproval is false', async () => {
+    const args = await spawnArgsFor(testGroup);
+    const env = envArgs(args);
+    expect(env['HTTP_PROXY']).toBeUndefined();
+    expect(env['HTTPS_PROXY']).toBeUndefined();
+    expect(env['NO_PROXY']).toBeUndefined();
   });
 });
 
