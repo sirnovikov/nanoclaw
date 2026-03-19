@@ -6,6 +6,8 @@
  * Gates tools/call and resources/read via the permission system.
  */
 import fs from 'node:fs';
+import http from 'node:http';
+import https from 'node:https';
 import net from 'node:net';
 
 import { logger } from './logger.js';
@@ -92,8 +94,7 @@ export function createMcpBridge(
       return `mcp__${config.name}__${toolName}`;
     }
     if (method === 'resources/read') {
-      const uri =
-        typeof params.uri === 'string' ? params.uri : '<unknown>';
+      const uri = typeof params.uri === 'string' ? params.uri : '<unknown>';
       return `mcp__${config.name}__resource:${uri}`;
     }
     return `mcp__${config.name}__${method}`;
@@ -144,16 +145,52 @@ export function createMcpBridge(
   async function forwardToUpstream(
     request: JsonRpcRequest,
   ): Promise<JsonRpcResponse> {
-    // TODO Task 5: implement HTTP/SSE forwarding to remote MCP server
-    // For now, return a placeholder error
-    return {
-      jsonrpc: '2.0',
-      id: request.id,
-      error: {
-        code: -32603,
-        message: 'Upstream forwarding not yet implemented',
-      },
+    const url = new URL(config.url);
+    const body = JSON.stringify(request);
+
+    const headers: Record<string, string> = {
+      'content-type': 'application/json',
+      'content-length': Buffer.byteLength(body).toString(),
+      ...config.headers,
     };
+
+    return new Promise<JsonRpcResponse>((resolve) => {
+      const proto = url.protocol === 'https:' ? https : http;
+      const req = proto.request(
+        {
+          hostname: url.hostname,
+          port: url.port || (url.protocol === 'https:' ? 443 : 80),
+          path: url.pathname,
+          method: 'POST',
+          headers,
+        },
+        (res) => {
+          const chunks: Buffer[] = [];
+          res.on('data', (c: Buffer) => chunks.push(c));
+          res.on('end', () => {
+            try {
+              const responseBody = Buffer.concat(chunks).toString();
+              resolve(JSON.parse(responseBody) as JsonRpcResponse);
+            } catch {
+              resolve({
+                jsonrpc: '2.0',
+                id: request.id,
+                error: { code: -32603, message: 'Invalid upstream response' },
+              });
+            }
+          });
+        },
+      );
+      req.on('error', (err: Error) => {
+        resolve({
+          jsonrpc: '2.0',
+          id: request.id,
+          error: { code: -32603, message: `Upstream error: ${err.message}` },
+        });
+      });
+      req.write(body);
+      req.end();
+    });
   }
 
   async function handleJsonRpc(
