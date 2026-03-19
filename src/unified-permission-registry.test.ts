@@ -171,4 +171,64 @@ describe('unified permission response routing', () => {
     ).not.toThrow();
     expect(insertPermissionRule).not.toHaveBeenCalled();
   });
+
+  it('persists one rule per pattern when proposal has multiple patterns', () => {
+    const resolved = vi.fn();
+    registerPermissionResolver('bridge-req-7', {
+      resolve: resolved,
+      egressType: 'mcp',
+      subject: 'test-subject',
+      proposal: {
+        name: 'Allow Vercel tools',
+        patterns: ['mcp__vercel__list_teams', 'mcp__vercel__list_deployments'],
+        effect: 'allow' as const,
+        scope: 'global' as const,
+        description: 'Allow Vercel list tools globally',
+      },
+      groupFolder: 'test-group',
+    });
+
+    handleProxyPermissionResponse('bridge-req-7', 'always');
+
+    expect(resolved).toHaveBeenCalledWith('allow');
+    expect(insertPermissionRule).toHaveBeenCalledTimes(2);
+
+    const mockedInsert = vi.mocked(insertPermissionRule);
+    const firstRule = mockedInsert.mock.calls[0]?.[0];
+    const secondRule = mockedInsert.mock.calls[1]?.[0];
+
+    expect(firstRule?.pattern).toBe('mcp__vercel__list_teams');
+    expect(firstRule?.effect).toBe('allow');
+    expect(firstRule?.egress_type).toBe('mcp');
+
+    expect(secondRule?.pattern).toBe('mcp__vercel__list_deployments');
+    expect(secondRule?.effect).toBe('allow');
+    expect(secondRule?.egress_type).toBe('mcp');
+  });
+
+  it('resolves with "deny" when proposal effect is "deny" and decision is "always"', () => {
+    const resolved = vi.fn();
+    registerPermissionResolver('bridge-req-8', {
+      resolve: resolved,
+      egressType: 'mcp',
+      subject: 'test-subject',
+      proposal: {
+        name: 'Deny Vercel delete',
+        patterns: ['mcp__vercel__delete_deployment'],
+        effect: 'deny' as const,
+        scope: 'global' as const,
+        description: 'Deny Vercel delete deployments globally',
+      },
+      groupFolder: 'test-group',
+    });
+
+    handleProxyPermissionResponse('bridge-req-8', 'always');
+
+    expect(resolved).toHaveBeenCalledWith('deny');
+    expect(insertPermissionRule).toHaveBeenCalledTimes(1);
+
+    const rule = vi.mocked(insertPermissionRule).mock.calls[0]?.[0];
+    expect(rule?.pattern).toBe('mcp__vercel__delete_deployment');
+    expect(rule?.effect).toBe('deny');
+  });
 });

@@ -5,7 +5,10 @@
  */
 import { describe, expect, it } from 'vitest';
 
-import { generateRuleProposal, validateProposal } from './permission-rule-generator.js';
+import {
+  generateRuleProposal,
+  validateProposal,
+} from './permission-rule-generator.js';
 
 // Check both API key availability and actual network access (sandboxed environments block DNS)
 const hasApiKey = !!(
@@ -15,8 +18,14 @@ const hasApiKey = !!(
     try {
       const fs = require('node:fs');
       const path = require('node:path');
-      const content = fs.readFileSync(path.join(process.cwd(), '.env'), 'utf-8');
-      return content.includes('HAIKU_API_KEY') || content.includes('ANTHROPIC_API_KEY');
+      const content = fs.readFileSync(
+        path.join(process.cwd(), '.env'),
+        'utf-8',
+      );
+      return (
+        content.includes('HAIKU_API_KEY') ||
+        content.includes('ANTHROPIC_API_KEY')
+      );
     } catch {
       return false;
     }
@@ -49,10 +58,7 @@ describeIntegration('generateRuleProposal (live Haiku)', () => {
   }, 15_000);
 
   it('generates valid CONNECT proposal for HTTPS host', async () => {
-    const result = await generateRuleProposal(
-      'connect',
-      'api.github.com:443',
-    );
+    const result = await generateRuleProposal('connect', 'api.github.com:443');
 
     expect(result).not.toBeNull();
     expect(result?.name.length).toBeLessThanOrEqual(40);

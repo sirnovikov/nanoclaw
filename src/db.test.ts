@@ -8,7 +8,9 @@ import {
   getAllRegisteredGroups,
   getMessagesSince,
   getNewMessages,
+  getRecentPermissionDecisions,
   getTaskById,
+  logPermissionDecision,
   setRegisteredGroup,
   storeChatMetadata,
   storeMessage,
@@ -484,5 +486,93 @@ describe('registered group isMain', () => {
     const group = groups['group@g.us'];
     expect(group).toBeDefined();
     expect(group?.isMain).toBeUndefined();
+  });
+});
+
+// --- permission audit log ---
+
+describe('permission audit log', () => {
+  it('logPermissionDecision inserts a record retrievable by getRecentPermissionDecisions', () => {
+    logPermissionDecision({
+      egress_type: 'http',
+      subject: 'https://example.com',
+      decision: 'allow',
+      group_folder: 'telegram_main',
+    });
+
+    const entries = getRecentPermissionDecisions('telegram_main');
+    expect(entries).toHaveLength(1);
+    expect(entries[0]?.egress_type).toBe('http');
+    expect(entries[0]?.subject).toBe('https://example.com');
+    expect(entries[0]?.decision).toBe('allow');
+    expect(entries[0]?.group_folder).toBe('telegram_main');
+    expect(entries[0]?.created_at).toBeDefined();
+  });
+
+  it('getRecentPermissionDecisions returns results in reverse chronological order', () => {
+    logPermissionDecision({ egress_type: 'http', subject: 'https://alpha.com', decision: 'allow', group_folder: 'telegram_main' });
+    logPermissionDecision({ egress_type: 'http', subject: 'https://beta.com', decision: 'deny', group_folder: 'telegram_main' });
+    logPermissionDecision({ egress_type: 'connect', subject: 'gamma.com:443', decision: 'allow', group_folder: 'telegram_main' });
+
+    const entries = getRecentPermissionDecisions('telegram_main');
+    expect(entries).toHaveLength(3);
+    // All subjects returned
+    const subjects = entries.map((e) => e.subject);
+    expect(subjects).toContain('https://alpha.com');
+    expect(subjects).toContain('https://beta.com');
+    expect(subjects).toContain('gamma.com:443');
+    // created_at is non-ascending (DESC order is maintained)
+    for (let i = 0; i < entries.length - 1; i++) {
+      expect((entries[i]?.created_at ?? '') >= (entries[i + 1]?.created_at ?? '')).toBe(true);
+    }
+  });
+
+  it('getRecentPermissionDecisions respects the limit parameter', () => {
+    for (let i = 1; i <= 5; i++) {
+      logPermissionDecision({
+        egress_type: 'http',
+        subject: `https://site-${i}.com`,
+        decision: 'allow',
+        group_folder: 'telegram_main',
+      });
+    }
+
+    const all = getRecentPermissionDecisions('telegram_main');
+    const limited = getRecentPermissionDecisions('telegram_main', 3);
+    expect(all).toHaveLength(5);
+    expect(limited).toHaveLength(3);
+    // The 3 limited results must be the same leading elements as the full list
+    expect(limited[0]).toEqual(all[0]);
+    expect(limited[1]).toEqual(all[1]);
+    expect(limited[2]).toEqual(all[2]);
+  });
+
+  it('getRecentPermissionDecisions filters by groupFolder', () => {
+    logPermissionDecision({
+      egress_type: 'http',
+      subject: 'https://group-a.com',
+      decision: 'allow',
+      group_folder: 'telegram_groupa',
+    });
+    logPermissionDecision({
+      egress_type: 'http',
+      subject: 'https://group-b.com',
+      decision: 'deny',
+      group_folder: 'telegram_groupb',
+    });
+
+    const entriesA = getRecentPermissionDecisions('telegram_groupa');
+    expect(entriesA).toHaveLength(1);
+    expect(entriesA[0]?.subject).toBe('https://group-a.com');
+
+    const entriesB = getRecentPermissionDecisions('telegram_groupb');
+    expect(entriesB).toHaveLength(1);
+    expect(entriesB[0]?.subject).toBe('https://group-b.com');
+  });
+
+  it('getRecentPermissionDecisions returns empty array when no decisions exist', () => {
+    const entries = getRecentPermissionDecisions('telegram_nonexistent');
+    expect(entries).toHaveLength(0);
+    expect(entries).toEqual([]);
   });
 });
