@@ -107,11 +107,16 @@ vi.mock('./container-group-registry.js', () => ({
 }));
 
 import { spawn } from 'node:child_process';
+import fs from 'node:fs';
 import {
   deregisterContainerGroup,
   registerContainerGroup,
 } from './container-group-registry.js';
-import { type ContainerOutput, runContainerAgent } from './container-runner.js';
+import {
+  type ContainerOutput,
+  extractRemoteMcpHosts,
+  runContainerAgent,
+} from './container-runner.js';
 import type { RegisteredGroup } from './types.js';
 
 const testGroup: RegisteredGroup = {
@@ -362,5 +367,276 @@ describe('container-runner timeout behavior', () => {
     const result = await resultPromise;
     expect(result.status).toBe('success');
     expect(result.newSessionId).toBe('session-456');
+  });
+});
+
+describe('extractRemoteMcpHosts', () => {
+  beforeEach(() => {
+    vi.mocked(fs.existsSync).mockReturnValue(false);
+    vi.mocked(fs.readFileSync).mockReturnValue('');
+  });
+
+  it('returns empty array when no .mcp.json exists', () => {
+    expect(extractRemoteMcpHosts('/tmp/group')).toEqual([]);
+  });
+
+  it('returns empty array when no mcpServers key', () => {
+    vi.mocked(fs.existsSync).mockReturnValue(true);
+    vi.mocked(fs.readFileSync).mockReturnValue(JSON.stringify({}));
+    expect(extractRemoteMcpHosts('/tmp/group')).toEqual([]);
+  });
+
+  it('returns empty array for command-based servers (no url)', () => {
+    vi.mocked(fs.existsSync).mockReturnValue(true);
+    vi.mocked(fs.readFileSync).mockReturnValue(
+      JSON.stringify({
+        mcpServers: {
+          local: { command: 'node', args: ['server.js'] },
+        },
+      }),
+    );
+    expect(extractRemoteMcpHosts('/tmp/group')).toEqual([]);
+  });
+
+  it('extracts hostname from URL-based server', () => {
+    vi.mocked(fs.existsSync).mockReturnValue(true);
+    vi.mocked(fs.readFileSync).mockReturnValue(
+      JSON.stringify({
+        mcpServers: {
+          vercel: { url: 'https://mcp.vercel.com/sse' },
+        },
+      }),
+    );
+    expect(extractRemoteMcpHosts('/tmp/group')).toEqual(['mcp.vercel.com']);
+  });
+
+  it('extracts hostnames from multiple URL servers', () => {
+    vi.mocked(fs.existsSync).mockReturnValue(true);
+    vi.mocked(fs.readFileSync).mockReturnValue(
+      JSON.stringify({
+        mcpServers: {
+          vercel: { url: 'https://mcp.vercel.com/sse' },
+          github: { url: 'https://api.github.com/mcp' },
+          local: { command: 'node', args: ['server.js'] },
+        },
+      }),
+    );
+    const hosts = extractRemoteMcpHosts('/tmp/group');
+    expect(hosts).toContain('mcp.vercel.com');
+    expect(hosts).toContain('api.github.com');
+    expect(hosts).toHaveLength(2);
+  });
+
+  it('skips malformed URL without throwing', () => {
+    vi.mocked(fs.existsSync).mockReturnValue(true);
+    vi.mocked(fs.readFileSync).mockReturnValue(
+      JSON.stringify({
+        mcpServers: {
+          bad: { url: 'not-a-url' },
+          good: { url: 'https://mcp.vercel.com/sse' },
+        },
+      }),
+    );
+    expect(extractRemoteMcpHosts('/tmp/group')).toEqual(['mcp.vercel.com']);
+  });
+
+  it('returns empty array on invalid JSON', () => {
+    vi.mocked(fs.existsSync).mockReturnValue(true);
+    vi.mocked(fs.readFileSync).mockReturnValue('not-json{{{');
+    expect(extractRemoteMcpHosts('/tmp/group')).toEqual([]);
+  });
+});
+
+describe('buildContainerArgs with remote MCP hosts in NO_PROXY', () => {
+  beforeEach(() => {
+    vi.useFakeTimers();
+    fakeProc = createFakeProcess();
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  async function spawnArgsFor(group: RegisteredGroup): Promise<string[]> {
+    vi.mocked(spawn).mockClear();
+    const resultPromise = runContainerAgent(group, testInput, () => {});
+    emitOutputMarker(fakeProc, {
+      status: 'success',
+      result: 'ok',
+      newSessionId: 's1',
+    });
+    await vi.advanceTimersByTimeAsync(10);
+    fakeProc.emit('close', 0);
+    await vi.advanceTimersByTimeAsync(10);
+    await resultPromise;
+    return [...(vi.mocked(spawn).mock.calls[0]?.[1] ?? [])];
+  }
+
+  function envArgs(args: string[]): Record<string, string> {
+    const result: Record<string, string> = {};
+    for (let i = 0; i < args.length - 1; i++) {
+      const nextArg = args[i + 1];
+      if (args[i] === '-e' && nextArg !== undefined) {
+        const eq = nextArg.indexOf('=');
+        if (eq !== -1) {
+          result[nextArg.slice(0, eq)] = nextArg.slice(eq + 1);
+        }
+      }
+    }
+    return result;
+  }
+
+  it('includes remote MCP hosts in NO_PROXY when permissionApproval is true', async () => {
+    // Mock extractRemoteMcpHosts to return hosts by controlling fs reads
+    const origExistsSync = vi.mocked(fs.existsSync).getMockImplementation();
+    const origReadFileSync = vi.mocked(fs.readFileSync).getMockImplementation();
+
+    vi.mocked(fs.existsSync).mockImplementation((p) => {
+      if (String(p).endsWith('.mcp.json')) return true;
+      return false;
+    });
+    vi.mocked(fs.readFileSync).mockImplementation(((p: string) => {
+      if (String(p).endsWith('.mcp.json')) {
+        return JSON.stringify({
+          mcpServers: {
+            vercel: { url: 'https://mcp.vercel.com/sse' },
+          },
+        });
+      }
+      return '';
+    }) as typeof fs.readFileSync);
+
+    const args = await spawnArgsFor(testGroupWithPermissionApproval);
+    const env = envArgs(args);
+    expect(env.NO_PROXY).toContain('mcp.vercel.com');
+    expect(env.no_proxy).toContain('mcp.vercel.com');
+
+    // Restore
+    if (origExistsSync)
+      vi.mocked(fs.existsSync).mockImplementation(origExistsSync);
+    if (origReadFileSync)
+      vi.mocked(fs.readFileSync).mockImplementation(origReadFileSync);
+  });
+
+  it('NO_PROXY has base set only when no remote MCP hosts', async () => {
+    const args = await spawnArgsFor(testGroupWithPermissionApproval);
+    const env = envArgs(args);
+    expect(env.NO_PROXY).toBe('localhost,127.0.0.1,host.docker.internal');
+  });
+
+  it('does not set permission-approval NO_PROXY when permissionApproval is false', async () => {
+    const args = await spawnArgsFor(testGroup);
+    const env = envArgs(args);
+    // When permissionApproval is false, the NO_PROXY may come from host env passthrough
+    // but should NOT contain the permission-approval base set (localhost,127.0.0.1,host.docker.internal)
+    // as an exact match — it either inherits process.env or is absent
+    if (env.NO_PROXY) {
+      // Host env may have NO_PROXY — that's fine, but it shouldn't be the
+      // permission-approval-specific value
+      expect(env.NO_PROXY).not.toBe('localhost,127.0.0.1,host.docker.internal');
+    }
+  });
+});
+
+describe('permission volume mounts', () => {
+  beforeEach(() => {
+    vi.useFakeTimers();
+    fakeProc = createFakeProcess();
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  async function spawnArgsFor(group: RegisteredGroup): Promise<string[]> {
+    vi.mocked(spawn).mockClear();
+    const resultPromise = runContainerAgent(group, testInput, () => {});
+    emitOutputMarker(fakeProc, {
+      status: 'success',
+      result: 'ok',
+      newSessionId: 's1',
+    });
+    await vi.advanceTimersByTimeAsync(10);
+    fakeProc.emit('close', 0);
+    await vi.advanceTimersByTimeAsync(10);
+    await resultPromise;
+    return [...(vi.mocked(spawn).mock.calls[0]?.[1] ?? [])];
+  }
+
+  it('includes permission mounts when permissionApproval is true', async () => {
+    const args = await spawnArgsFor(testGroupWithPermissionApproval);
+    const argsStr = args.join(' ');
+    expect(argsStr).toContain('/ipc/permissions/requests');
+    expect(argsStr).toContain('/ipc/permissions/responses');
+  });
+
+  it('responses mount is read-only when permissionApproval is true', async () => {
+    const args = await spawnArgsFor(testGroupWithPermissionApproval);
+    // Find the responses mount — readonlyMountArgs returns ['-v', 'host:container:ro']
+    const responsesArg = args.find((a) =>
+      a.includes('/ipc/permissions/responses'),
+    );
+    expect(responsesArg).toBeDefined();
+    expect(responsesArg).toContain(':ro');
+  });
+
+  it('does not include permission mounts when permissionApproval is false', async () => {
+    const args = await spawnArgsFor(testGroup);
+    const argsStr = args.join(' ');
+    expect(argsStr).not.toContain('/ipc/permissions/requests');
+    expect(argsStr).not.toContain('/ipc/permissions/responses');
+  });
+});
+
+describe('agent-runner source mount', () => {
+  beforeEach(() => {
+    vi.useFakeTimers();
+    fakeProc = createFakeProcess();
+    vi.mocked(fs.existsSync).mockReturnValue(false);
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  async function spawnGroup(group: RegisteredGroup): Promise<void> {
+    vi.mocked(spawn).mockClear();
+    const resultPromise = runContainerAgent(group, testInput, () => {});
+    emitOutputMarker(fakeProc, {
+      status: 'success',
+      result: 'ok',
+      newSessionId: 's1',
+    });
+    await vi.advanceTimersByTimeAsync(10);
+    fakeProc.emit('close', 0);
+    await vi.advanceTimersByTimeAsync(10);
+    await resultPromise;
+  }
+
+  it('mounts canonical agent-runner source read-only (no per-group copy)', async () => {
+    vi.mocked(fs.existsSync).mockReturnValue(false);
+
+    await spawnGroup(testGroup);
+
+    const args = vi.mocked(spawn).mock.calls[0]?.[1] as string[];
+    const joined = args.join(' ');
+    // Must mount from container/agent-runner/src, not from data/sessions/*/agent-runner-src
+    expect(joined).toContain('container/agent-runner/src');
+    expect(joined).not.toContain('agent-runner-src:');
+    // Mount must be read-only
+    expect(joined).toMatch(/agent-runner\/src:[^:]*:ro/);
+  });
+
+  it('does not create per-group agent-runner-src directory', async () => {
+    vi.mocked(fs.existsSync).mockReturnValue(false);
+
+    await spawnGroup(testGroup);
+
+    // No cpSync or copyFileSync calls for agent-runner-src
+    const cpCalls = vi.mocked(fs.cpSync).mock.calls;
+    const runnerCopy = cpCalls.find((call) =>
+      String(call[1]).includes('agent-runner-src'),
+    );
+    expect(runnerCopy).toBeUndefined();
   });
 });

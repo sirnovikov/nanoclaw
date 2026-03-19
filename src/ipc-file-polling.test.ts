@@ -33,7 +33,10 @@ beforeEach(() => {
   _initTestDatabase();
   setRegisteredGroup('main@g.us', MAIN);
   setRegisteredGroup('other@g.us', OTHER);
-  ipcBaseDir = path.join(os.tmpdir(), `ipc-poll-test-${process.pid}-${Date.now()}`);
+  ipcBaseDir = path.join(
+    os.tmpdir(),
+    `ipc-poll-test-${process.pid}-${Date.now()}`,
+  );
   fs.mkdirSync(ipcBaseDir, { recursive: true });
   vi.useFakeTimers();
   deps = {
@@ -75,7 +78,11 @@ describe('startIpcWatcher — message forwarding', () => {
     fs.mkdirSync(messagesDir, { recursive: true });
     fs.writeFileSync(
       path.join(messagesDir, '002.json'),
-      JSON.stringify({ type: 'message', chatJid: 'main@g.us', text: 'infiltrate' }),
+      JSON.stringify({
+        type: 'message',
+        chatJid: 'main@g.us',
+        text: 'infiltrate',
+      }),
     );
 
     startIpcWatcher(deps, ipcBaseDir);
@@ -90,7 +97,11 @@ describe('startIpcWatcher — message forwarding', () => {
     fs.mkdirSync(messagesDir, { recursive: true });
     fs.writeFileSync(
       path.join(messagesDir, '003.json'),
-      JSON.stringify({ type: 'message', chatJid: 'other@g.us', text: 'broadcast' }),
+      JSON.stringify({
+        type: 'message',
+        chatJid: 'other@g.us',
+        text: 'broadcast',
+      }),
     );
 
     startIpcWatcher(deps, ipcBaseDir);
@@ -100,97 +111,3 @@ describe('startIpcWatcher — message forwarding', () => {
   });
 });
 
-describe('cleanupOrphanedPermissions', () => {
-  it('writes deny response for each orphaned .processing file on startup', () => {
-    const reqDir = path.join(ipcBaseDir, 'other-group', 'permissions', 'requests');
-    const resDir = path.join(ipcBaseDir, 'other-group', 'permissions', 'responses');
-    fs.mkdirSync(reqDir, { recursive: true });
-    fs.mkdirSync(resDir, { recursive: true });
-
-    fs.writeFileSync(
-      path.join(reqDir, 'req-abc.processing'),
-      JSON.stringify({ requestId: 'req-abc', chatJid: 'other@g.us' }),
-    );
-
-    // cleanupOrphanedPermissions runs synchronously at startup — write files BEFORE calling startIpcWatcher
-    startIpcWatcher(deps, ipcBaseDir);
-
-    const responseFile = path.join(resDir, 'req-abc.json');
-    expect(fs.existsSync(responseFile)).toBe(true);
-    const response = JSON.parse(fs.readFileSync(responseFile, 'utf-8'));
-    expect(response).toEqual({ approved: false });
-  });
-
-  it('does not overwrite an existing response file', () => {
-    const reqDir = path.join(ipcBaseDir, 'other-group', 'permissions', 'requests');
-    const resDir = path.join(ipcBaseDir, 'other-group', 'permissions', 'responses');
-    fs.mkdirSync(reqDir, { recursive: true });
-    fs.mkdirSync(resDir, { recursive: true });
-
-    fs.writeFileSync(
-      path.join(reqDir, 'req-xyz.processing'),
-      JSON.stringify({ requestId: 'req-xyz', chatJid: 'other@g.us' }),
-    );
-    fs.writeFileSync(
-      path.join(resDir, 'req-xyz.json'),
-      JSON.stringify({ approved: true }),
-    );
-
-    startIpcWatcher(deps, ipcBaseDir);
-
-    const response = JSON.parse(
-      fs.readFileSync(path.join(resDir, 'req-xyz.json'), 'utf-8'),
-    );
-    expect(response).toEqual({ approved: true });
-  });
-
-  it('ignores non-.processing files in requests dir', () => {
-    const reqDir = path.join(ipcBaseDir, 'other-group', 'permissions', 'requests');
-    const resDir = path.join(ipcBaseDir, 'other-group', 'permissions', 'responses');
-    fs.mkdirSync(reqDir, { recursive: true });
-    fs.mkdirSync(resDir, { recursive: true });
-
-    fs.writeFileSync(
-      path.join(reqDir, 'new-req.json'),
-      JSON.stringify({ requestId: 'new-req', chatJid: 'other@g.us' }),
-    );
-
-    startIpcWatcher(deps, ipcBaseDir);
-
-    expect(fs.existsSync(path.join(resDir, 'new-req.json'))).toBe(false);
-  });
-});
-
-describe('startIpcWatcher — permission request forwarding', () => {
-  it('calls onPermissionRequest and renames file to .processing', async () => {
-    const onPermissionRequest = vi.fn();
-    deps.onPermissionRequest = onPermissionRequest;
-
-    const permDir = path.join(ipcBaseDir, 'other-group', 'permissions', 'requests');
-    fs.mkdirSync(permDir, { recursive: true });
-    fs.writeFileSync(
-      path.join(permDir, 'perm-001.json'),
-      JSON.stringify({
-        type: 'permission_request',
-        requestId: 'perm-001',
-        chatJid: 'other@g.us',
-        toolName: 'bash',
-        toolInput: { command: 'ls' },
-      }),
-    );
-
-    startIpcWatcher(deps, ipcBaseDir);
-    await vi.advanceTimersByTimeAsync(10);
-
-    expect(onPermissionRequest).toHaveBeenCalledWith(
-      'other@g.us',
-      'other-group',
-      'perm-001',
-      'bash',
-      { command: 'ls' },
-    );
-
-    expect(fs.existsSync(path.join(permDir, 'perm-001.json'))).toBe(false);
-    expect(fs.existsSync(path.join(permDir, 'perm-001.processing'))).toBe(true);
-  });
-});

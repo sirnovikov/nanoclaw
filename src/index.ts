@@ -46,7 +46,7 @@ import {
   storeChatMetadata,
   storeMessage,
 } from './db.js';
-import { resolveGroupFolderPath, resolveGroupIpcPath } from './group-folder.js';
+import { resolveGroupFolderPath } from './group-folder.js';
 import { GroupQueue } from './group-queue.js';
 import { startIpcWatcher } from './ipc.js';
 import { logger } from './logger.js';
@@ -556,34 +556,12 @@ async function main(): Promise<void> {
     ) => storeChatMetadata(chatJid, timestamp, name, channel, isGroup),
     registeredGroups: () => registeredGroups,
     onPermissionResponse: (
-      groupFolder: string,
+      _groupFolder: string,
       requestId: string,
       decision: 'once' | 'always' | 'deny',
     ) => {
       // Proxy HTTP/HTTPS permission (no-op if requestId not in pending map)
       handleProxyPermissionResponse(requestId, decision);
-
-      // MCP permission via file-based IPC — write response so container hook can read it
-      const approved = decision !== 'deny';
-      try {
-        const resDir = path.join(
-          resolveGroupIpcPath(groupFolder),
-          'permissions',
-          'responses',
-        );
-        fs.mkdirSync(resDir, { recursive: true });
-        const responsePath = path.join(resDir, `${requestId}.json`);
-        fs.writeFileSync(responsePath, JSON.stringify({ approved }));
-        logger.info(
-          { groupFolder, requestId, decision },
-          'Permission response written to IPC',
-        );
-      } catch (err) {
-        logger.error(
-          { groupFolder, requestId, err },
-          'Failed to write MCP permission response',
-        );
-      }
     },
   };
 
@@ -666,41 +644,6 @@ async function main(): Promise<void> {
     getAvailableGroups,
     writeGroupsSnapshot: (gf, im, ag, rj) =>
       writeGroupsSnapshot(gf, im, ag, rj),
-    onPermissionRequest: (
-      chatJid,
-      groupFolder,
-      requestId,
-      toolName,
-      toolInput,
-    ) => {
-      const channel = findChannel(channels, chatJid);
-      if (channel?.sendPermissionRequest) {
-        // Format subject display from toolName + toolInput
-        const inputStr = JSON.stringify(toolInput ?? {});
-        const _subject =
-          inputStr.length > 200 ? `${inputStr.slice(0, 200)}…` : inputStr;
-        channel
-          .sendPermissionRequest(
-            chatJid,
-            requestId,
-            'mcp',
-            toolName,
-            groupFolder,
-            null,
-          )
-          .catch((err) => {
-            logger.error(
-              { chatJid, requestId, err },
-              'Failed to send MCP permission request via channel',
-            );
-          });
-      } else {
-        logger.warn(
-          { chatJid, requestId },
-          'No channel supports sendPermissionRequest',
-        );
-      }
-    },
   });
   queue.setProcessMessagesFn(processGroupMessages);
   recoverPendingMessages();

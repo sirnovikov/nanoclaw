@@ -21,85 +21,13 @@ export interface IpcDeps {
     availableGroups: AvailableGroup[],
     registeredJids: Set<string>,
   ) => void;
-  onPermissionRequest?: (
-    chatJid: string,
-    groupFolder: string,
-    requestId: string,
-    toolName: string,
-    toolInput: unknown,
-  ) => void;
 }
 
-/**
- * On startup, scan for orphaned .processing files (requests that were in-flight
- * when the host restarted). Write deny responses so containers don't hang forever.
- */
-function cleanupOrphanedPermissions(ipcBaseDir: string): void {
-  try {
-    const groupFolders = fs.existsSync(ipcBaseDir)
-      ? fs.readdirSync(ipcBaseDir).filter((f) => {
-          try {
-            return (
-              fs.statSync(path.join(ipcBaseDir, f)).isDirectory() &&
-              f !== 'errors'
-            );
-          } catch {
-            return false;
-          }
-        })
-      : [];
-
-    for (const groupFolder of groupFolders) {
-      const reqDir = path.join(
-        ipcBaseDir,
-        groupFolder,
-        'permissions',
-        'requests',
-      );
-      const resDir = path.join(
-        ipcBaseDir,
-        groupFolder,
-        'permissions',
-        'responses',
-      );
-      if (!fs.existsSync(reqDir)) continue;
-
-      const orphans = fs
-        .readdirSync(reqDir)
-        .filter((f) => f.endsWith('.processing'));
-      for (const orphan of orphans) {
-        try {
-          const reqPath = path.join(reqDir, orphan);
-          const data = JSON.parse(fs.readFileSync(reqPath, 'utf-8'));
-          const reqId = data.requestId as string;
-          if (reqId) {
-            fs.mkdirSync(resDir, { recursive: true });
-            const resPath = path.join(resDir, `${reqId}.json`);
-            if (!fs.existsSync(resPath)) {
-              fs.writeFileSync(resPath, JSON.stringify({ approved: false }));
-            }
-            logger.warn(
-              { groupFolder, reqId },
-              'Wrote deny response for orphaned .processing permission request',
-            );
-          }
-        } catch (err) {
-          logger.error(
-            { groupFolder, file: orphan, err },
-            'Failed to clean up orphaned permission request',
-          );
-        }
-      }
-    }
-  } catch (err) {
-    logger.error({ err }, 'Error during orphaned permission cleanup');
-  }
-}
-
-export function startIpcWatcher(deps: IpcDeps, ipcBaseDir = path.join(DATA_DIR, 'ipc')): void {
+export function startIpcWatcher(
+  deps: IpcDeps,
+  ipcBaseDir = path.join(DATA_DIR, 'ipc'),
+): void {
   fs.mkdirSync(ipcBaseDir, { recursive: true });
-
-  cleanupOrphanedPermissions(ipcBaseDir);
 
   const processIpcFiles = async () => {
     // Scan all group IPC directories (identity determined by directory)
@@ -210,67 +138,6 @@ export function startIpcWatcher(deps: IpcDeps, ipcBaseDir = path.join(DATA_DIR, 
         logger.error({ err, sourceGroup }, 'Error reading IPC tasks directory');
       }
 
-      // Process MCP permission requests from this group's IPC directory.
-      // Written by the container's PermissionRequest hook using O_CREAT|O_EXCL.
-      // We detect new .json requests, notify via Telegram, then rename to
-      // .processing so we don't re-send on the next poll cycle.
-      if (deps.onPermissionRequest) {
-        const permDir = path.join(
-          ipcBaseDir,
-          sourceGroup,
-          'permissions',
-          'requests',
-        );
-        try {
-          if (fs.existsSync(permDir)) {
-            const pendingFiles = fs
-              .readdirSync(permDir)
-              .filter((f) => f.endsWith('.json') && !f.endsWith('.processing'));
-            for (const file of pendingFiles) {
-              const filePath = path.join(permDir, file);
-              try {
-                const data = JSON.parse(fs.readFileSync(filePath, 'utf-8'));
-                if (
-                  data.type === 'permission_request' &&
-                  data.requestId &&
-                  data.chatJid &&
-                  data.toolName
-                ) {
-                  deps.onPermissionRequest(
-                    data.chatJid,
-                    sourceGroup,
-                    data.requestId,
-                    data.toolName,
-                    data.toolInput ?? {},
-                  );
-                  // Rename to .processing (atomic) — exclusively owned by host
-                  fs.renameSync(
-                    filePath,
-                    path.join(
-                      path.dirname(filePath),
-                      `${path.basename(filePath, '.json')}.processing`,
-                    ),
-                  );
-                  logger.info(
-                    { sourceGroup, requestId: data.requestId },
-                    'MCP permission request forwarded',
-                  );
-                }
-              } catch (err) {
-                logger.error(
-                  { file, sourceGroup, err },
-                  'Error processing permission request',
-                );
-              }
-            }
-          }
-        } catch (err) {
-          logger.error(
-            { err, sourceGroup },
-            'Error reading IPC permissions directory',
-          );
-        }
-      }
     }
 
     setTimeout(processIpcFiles, IPC_POLL_INTERVAL);

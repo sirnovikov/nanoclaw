@@ -17,7 +17,6 @@
 import fs from 'fs';
 import path from 'path';
 import { query, HookCallback, PreCompactHookInput } from '@anthropic-ai/claude-agent-sdk';
-import { createPermissionRequestHook } from './permission-hook.js';
 import { fileURLToPath } from 'url';
 
 interface ContainerInput {
@@ -28,7 +27,6 @@ interface ContainerInput {
   isMain: boolean;
   isScheduledTask?: boolean;
   assistantName?: string;
-  permissionApproval?: boolean;
 }
 
 interface ContainerOutput {
@@ -402,10 +400,7 @@ async function runQuery(
         ? { type: 'preset' as const, preset: 'claude_code' as const, append: globalClaudeMd }
         : undefined,
       allowedTools: [
-        // When permissionApproval is on, Bash is excluded from the pre-approved list
-        // so the PermissionRequest hook fires for every Bash call. The hook then
-        // auto-approves safe commands and escalates risky ones to Telegram.
-        ...(containerInput.permissionApproval ? [] : ['Bash']),
+        'Bash',
         'Read', 'Write', 'Edit', 'Glob', 'Grep',
         'WebSearch', 'WebFetch',
         'Task', 'TaskOutput', 'TaskStop',
@@ -415,8 +410,8 @@ async function runQuery(
         'mcp__nanoclaw__*'
       ],
       env: sdkEnv,
-      permissionMode: containerInput.permissionApproval ? 'default' : 'bypassPermissions',
-      allowDangerouslySkipPermissions: !containerInput.permissionApproval,
+      permissionMode: 'bypassPermissions',
+      allowDangerouslySkipPermissions: true,
       settingSources: ['project', 'user'],
       mcpServers: {
         nanoclaw: {
@@ -431,9 +426,6 @@ async function runQuery(
       },
       hooks: {
         PreCompact: [{ hooks: [createPreCompactHook(containerInput.assistantName)] }],
-        ...(containerInput.permissionApproval ? {
-          PermissionRequest: [{ hooks: [createPermissionRequestHook(containerInput.groupFolder, containerInput.chatJid)] }],
-        } : {}),
       },
     }
   })) {
