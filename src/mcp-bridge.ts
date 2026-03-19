@@ -114,7 +114,7 @@ export function createMcpBridge(
     const requestId = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
 
     // Generate Haiku rule proposal eagerly (before sending Telegram message)
-    const proposal = await generateRuleProposal('mcp', subject);
+    const proposal = await generateRuleProposal('mcp', subject, toolsList);
 
     const decisionPromise = new Promise<'allow' | 'deny'>((resolve) => {
       const timeout = setTimeout(() => {

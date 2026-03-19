@@ -73,6 +73,29 @@ describe('buildPrompt', () => {
     const prompt = buildPrompt('connect', 'api.github.com:443');
     expect(prompt).toContain('connect');
   });
+
+  it('includes tools list when provided for MCP egress', () => {
+    const toolsList = [
+      { name: 'list_teams' },
+      { name: 'deploy' },
+      { name: 'delete_project' },
+    ];
+    const prompt = buildPrompt('mcp', 'mcp__vercel__list_teams', toolsList);
+    expect(prompt).toContain('Available tools on this MCP server:');
+    expect(prompt).toContain('- list_teams');
+    expect(prompt).toContain('- deploy');
+    expect(prompt).toContain('- delete_project');
+  });
+
+  it('omits tools section when toolsList is null', () => {
+    const prompt = buildPrompt('mcp', 'mcp__vercel__list_teams', null);
+    expect(prompt).not.toContain('Available tools on this MCP server:');
+  });
+
+  it('omits tools section when toolsList is empty', () => {
+    const prompt = buildPrompt('mcp', 'mcp__vercel__list_teams', []);
+    expect(prompt).not.toContain('Available tools on this MCP server:');
+  });
 });
 
 describe('validateProposal', () => {
