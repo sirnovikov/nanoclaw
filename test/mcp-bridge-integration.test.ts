@@ -16,6 +16,16 @@ vi.mock('../src/logger.js', () => ({
   logger: { info: vi.fn(), error: vi.fn(), debug: vi.fn(), warn: vi.fn() },
 }));
 
+vi.mock('../src/env.js', () => ({
+  readEnvFile: vi.fn(() => ({})),
+}));
+
+vi.mock('../src/db.js', () => ({
+  _initTestDatabase: vi.fn(),
+  insertPermissionRule: vi.fn(),
+  getDb: vi.fn(),
+}));
+
 vi.mock('../src/permission-rule-engine/rule-engine.js', () => ({
   checkPermissionRule: vi.fn().mockReturnValue('allow'),
 }));
@@ -25,6 +35,9 @@ vi.mock('../src/permission-rule-generator.js', () => ({
 }));
 
 import { createMcpBridge, type McpBridgeDeps } from '../src/mcp-bridge.js';
+import { handleProxyPermissionResponse } from '../src/credential-proxy.js';
+import { checkPermissionRule } from '../src/permission-rule-engine/rule-engine.js';
+import { insertPermissionRule } from '../src/db.js';
 
 function makeDeps(overrides?: Partial<McpBridgeDeps>): McpBridgeDeps {
   return {
@@ -39,18 +52,16 @@ describe.skipIf(!canListen)('MCP bridge HTTP forwarding', () => {
   let upstreamServer: http.Server;
   let upstreamPort: number;
   let lastRequestHeaders: http.IncomingHttpHeaders;
-  let lastRequestBody: string;
 
   beforeEach(async () => {
+    vi.clearAllMocks();
     lastRequestHeaders = {};
-    lastRequestBody = '';
 
     upstreamServer = http.createServer((req, res) => {
       lastRequestHeaders = { ...req.headers };
       const chunks: Buffer[] = [];
       req.on('data', (c: Buffer) => chunks.push(c));
       req.on('end', () => {
-        lastRequestBody = Buffer.concat(chunks).toString();
         res.writeHead(200, { 'content-type': 'application/json' });
         res.end(
           JSON.stringify({
@@ -75,10 +86,7 @@ describe.skipIf(!canListen)('MCP bridge HTTP forwarding', () => {
 
   it('forwards tools/list to upstream and returns result', async () => {
     const bridge = createMcpBridge(
-      {
-        name: 'test',
-        url: `http://127.0.0.1:${upstreamPort}/mcp`,
-      },
+      { name: 'test', url: `http://127.0.0.1:${upstreamPort}/mcp` },
       makeDeps(),
     );
 
@@ -115,10 +123,7 @@ describe.skipIf(!canListen)('MCP bridge HTTP forwarding', () => {
 
   it('caches tools list from tools/list response', async () => {
     const bridge = createMcpBridge(
-      {
-        name: 'test',
-        url: `http://127.0.0.1:${upstreamPort}/mcp`,
-      },
+      { name: 'test', url: `http://127.0.0.1:${upstreamPort}/mcp` },
       makeDeps(),
     );
 
@@ -136,10 +141,7 @@ describe.skipIf(!canListen)('MCP bridge HTTP forwarding', () => {
 
   it('returns error when upstream is unreachable', async () => {
     const bridge = createMcpBridge(
-      {
-        name: 'test',
-        url: 'http://127.0.0.1:59999/mcp',
-      },
+      { name: 'test', url: 'http://127.0.0.1:59999/mcp' },
       makeDeps(),
     );
 
@@ -153,5 +155,178 @@ describe.skipIf(!canListen)('MCP bridge HTTP forwarding', () => {
     expect(response.error).toBeDefined();
     expect(response.error?.code).toBe(-32603);
     expect(response.error?.message).toMatch(/Upstream error:/);
+  });
+});
+
+/**
+ * Permission approval flow — deny path.
+ * No upstream server needed (denied requests never forward).
+ */
+describe('Permission approval deny flow (no server needed)', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    (checkPermissionRule as ReturnType<typeof vi.fn>).mockReturnValue(undefined);
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it('deny via unified registry → returns JSON-RPC error', async () => {
+    const deps = makeDeps();
+    // URL doesn't matter — denied requests never reach upstream
+    const bridge = createMcpBridge(
+      { name: 'vercel', url: 'http://127.0.0.1:1/mcp' },
+      deps,
+    );
+
+    (deps.sendPermissionRequest as ReturnType<typeof vi.fn>).mockImplementation(async (req) => {
+      // Simulate Telegram deny button tap
+      setTimeout(() => handleProxyPermissionResponse(req.requestId, 'deny'), 10);
+      return 42;
+    });
+
+    const response = await bridge.handleJsonRpc({
+      jsonrpc: '2.0',
+      id: 1,
+      method: 'tools/call',
+      params: { name: 'deploy', arguments: {} },
+    });
+
+    expect(response.error).toBeDefined();
+    expect(response.error?.message).toContain('denied');
+    expect(insertPermissionRule).not.toHaveBeenCalled();
+  });
+
+  it('sendPermissionRequest includes toolInput for tools/call', async () => {
+    const deps = makeDeps();
+    const bridge = createMcpBridge(
+      { name: 'vercel', url: 'http://127.0.0.1:1/mcp' },
+      deps,
+    );
+
+    (deps.sendPermissionRequest as ReturnType<typeof vi.fn>).mockImplementation(async (req) => {
+      setTimeout(() => handleProxyPermissionResponse(req.requestId, 'deny'), 10);
+      return 42;
+    });
+
+    await bridge.handleJsonRpc({
+      jsonrpc: '2.0',
+      id: 1,
+      method: 'tools/call',
+      params: { name: 'deploy', arguments: { project: 'my-app', env: 'prod' } },
+    });
+
+    expect(deps.sendPermissionRequest).toHaveBeenCalledWith(
+      expect.objectContaining({
+        toolInput: { project: 'my-app', env: 'prod' },
+      }),
+    );
+  });
+});
+
+/**
+ * Permission approval flow — approve paths.
+ * Needs an upstream HTTP server to verify forwarding after approval.
+ */
+describe.skipIf(!canListen)('Permission approval flow (bridge → Telegram sim → upstream)', () => {
+  let upstreamServer: http.Server;
+  let upstreamPort: number;
+
+  beforeEach(async () => {
+    vi.clearAllMocks();
+    (checkPermissionRule as ReturnType<typeof vi.fn>).mockReturnValue(undefined);
+
+    upstreamServer = http.createServer((req, res) => {
+      const chunks: Buffer[] = [];
+      req.on('data', (c: Buffer) => chunks.push(c));
+      req.on('end', () => {
+        const body = Buffer.concat(chunks).toString();
+        res.writeHead(200, { 'content-type': 'application/json' });
+        res.end(
+          JSON.stringify({
+            jsonrpc: '2.0',
+            id: JSON.parse(body).id,
+            result: { content: [{ type: 'text', text: 'deployed!' }] },
+          }),
+        );
+      });
+    });
+
+    await new Promise<void>((resolve) =>
+      upstreamServer.listen(0, '127.0.0.1', resolve),
+    );
+    upstreamPort = (upstreamServer.address() as AddressInfo).port;
+  });
+
+  afterEach(async () => {
+    await new Promise<void>((r) => upstreamServer?.close(() => r()));
+    vi.restoreAllMocks();
+  });
+
+  it('approve "once" → forwards to upstream and returns result', async () => {
+    const deps = makeDeps();
+    const bridge = createMcpBridge(
+      { name: 'vercel', url: `http://127.0.0.1:${upstreamPort}/mcp` },
+      deps,
+    );
+
+    (deps.sendPermissionRequest as ReturnType<typeof vi.fn>).mockImplementation(async (req) => {
+      setTimeout(() => handleProxyPermissionResponse(req.requestId, 'once'), 10);
+      return 42;
+    });
+
+    const response = await bridge.handleJsonRpc({
+      jsonrpc: '2.0',
+      id: 1,
+      method: 'tools/call',
+      params: { name: 'deploy', arguments: { project: 'my-app' } },
+    });
+
+    expect(response.error).toBeUndefined();
+    expect(response.result).toEqual({
+      content: [{ type: 'text', text: 'deployed!' }],
+    });
+    expect(insertPermissionRule).not.toHaveBeenCalled();
+  });
+
+  it('approve "always" → forwards + persists rule to DB', async () => {
+    const { generateRuleProposal } = await import(
+      '../src/permission-rule-generator.js'
+    );
+    (generateRuleProposal as ReturnType<typeof vi.fn>).mockResolvedValue({
+      name: 'Allow Vercel deploy',
+      pattern: 'mcp__vercel__deploy',
+      scope: 'global',
+      description: 'Allow deploying via Vercel MCP',
+    });
+
+    const deps = makeDeps();
+    const bridge = createMcpBridge(
+      { name: 'vercel', url: `http://127.0.0.1:${upstreamPort}/mcp` },
+      deps,
+    );
+
+    (deps.sendPermissionRequest as ReturnType<typeof vi.fn>).mockImplementation(async (req) => {
+      setTimeout(
+        () => handleProxyPermissionResponse(req.requestId, 'always'),
+        10,
+      );
+      return 42;
+    });
+
+    const response = await bridge.handleJsonRpc({
+      jsonrpc: '2.0',
+      id: 1,
+      method: 'tools/call',
+      params: { name: 'deploy', arguments: { project: 'my-app' } },
+    });
+
+    expect(response.error).toBeUndefined();
+    expect(insertPermissionRule).toHaveBeenCalledTimes(1);
+    const rule = (insertPermissionRule as ReturnType<typeof vi.fn>).mock.calls[0]?.[0];
+    expect(rule?.pattern).toBe('mcp__vercel__deploy');
+    expect(rule?.effect).toBe('allow');
+    expect(rule?.source).toBe('telegram');
   });
 });

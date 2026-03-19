@@ -111,10 +111,15 @@ vi.mock('./container-group-registry.js', () => ({
 
 // Mock mcp-bridge
 const mockBridgeListen = vi.fn(async () => vi.fn());
+const mockBridgeListenTcp = vi.fn(async () => ({
+  port: 54321,
+  cleanup: vi.fn(),
+}));
 const mockBridge = {
   handleJsonRpc: vi.fn(),
   resolvePermission: vi.fn(),
   listen: mockBridgeListen,
+  listenTcp: mockBridgeListenTcp,
   toolsList: null,
 };
 vi.mock('./mcp-bridge.js', () => ({
@@ -591,16 +596,31 @@ describe('MCP bridge setup', () => {
   });
 
   describe('generateShadowMcpConfig', () => {
-    it('returns null when no local servers', () => {
-      expect(generateShadowMcpConfig({})).toBeNull();
+    it('writes empty mcpServers when no local servers', () => {
+      const result = generateShadowMcpConfig({});
+      expect(result).toBeTypeOf('string');
+      expect(result).toContain('nanoclaw-mcp-');
+
+      // Verify it writes {"mcpServers": {}} — this shadows the original
+      // .mcp.json so the container SDK does NOT see remote servers
+      const writeCalls = vi.mocked(fs.writeFileSync).mock.calls;
+      const shadowCall = writeCalls.find(
+        (call) =>
+          typeof call[0] === 'string' &&
+          (call[0] as string).includes('nanoclaw-mcp-'),
+      );
+      expect(shadowCall).toBeDefined();
+      const written = JSON.parse(shadowCall?.[1] as string);
+      expect(written).toEqual({ mcpServers: {} });
     });
 
     it('writes shadow config with only local servers', () => {
+      vi.mocked(fs.writeFileSync).mockClear();
       const localServers = {
         'my-tool': { command: 'npx', args: ['tool-server'] },
       };
       const result = generateShadowMcpConfig(localServers);
-      expect(result).not.toBeNull();
+      expect(result).toBeTypeOf('string');
 
       // Verify writeFileSync was called with the correct content
       const writeCalls = vi.mocked(fs.writeFileSync).mock.calls;
@@ -621,6 +641,7 @@ describe('MCP bridge setup', () => {
       fakeProc = createFakeProcess();
       vi.mocked(createMcpBridge).mockClear();
       mockBridgeListen.mockClear();
+      mockBridgeListenTcp.mockClear();
       vi.mocked(fs.existsSync).mockReturnValue(false);
       vi.mocked(fs.readFileSync).mockReturnValue('');
     });
@@ -720,24 +741,42 @@ describe('MCP bridge setup', () => {
         }),
         expect.objectContaining({ groupFolder: testGroup.folder }),
       );
-      expect(mockBridgeListen).toHaveBeenCalled();
+      expect(mockBridgeListenTcp).toHaveBeenCalled();
 
-      // Verify stdin received mcpBridges
-      const stdinChunks: string[] = [];
-      fakeProc.stdin.on('data', (d: Buffer) => stdinChunks.push(d.toString()));
-      // stdin was already written and ended; read what was captured
-      const _stdinData = vi.mocked(spawn).mock.results[0]?.value?.stdin;
-      // Check the actual write call on the fake proc stdin
-      // The spawn mock returns fakeProc, so stdin.write was called on fakeProc.stdin
-      // PassThrough stores it — read it back
+      // Verify stdin received mcpBridges with TCP connection args
       const written = fakeProc.stdin.read();
       if (written) {
         const parsed = JSON.parse(written.toString());
         expect(parsed.mcpBridges).toBeDefined();
         expect(parsed.mcpBridges).toHaveLength(1);
         expect(parsed.mcpBridges[0].name).toBe('remote-svc');
-        expect(parsed.mcpBridges[0].args).toContain('/bridge/remote-svc.sock');
+        expect(parsed.mcpBridges[0].args).toContain(
+          'host.docker.internal:54321',
+        );
       }
+    });
+
+    it('shadows .mcp.json even when only remote servers exist (no local)', () => {
+      // This is the critical bug fix: when .mcp.json has ONLY remote servers
+      // (like Vercel), the shadow must still be written with empty mcpServers.
+      // Otherwise the container SDK reads the original .mcp.json and tries
+      // to connect directly to the remote server, bypassing the bridge.
+
+      // Test generateShadowMcpConfig directly — always returns a path, even
+      // when there are zero local servers.
+      vi.mocked(fs.writeFileSync).mockClear();
+      const result = generateShadowMcpConfig({});
+      expect(result).toBeTypeOf('string');
+
+      const writeCalls = vi.mocked(fs.writeFileSync).mock.calls;
+      const shadowCall = writeCalls.find(
+        (call) =>
+          typeof call[0] === 'string' &&
+          (call[0] as string).includes('nanoclaw-mcp-'),
+      );
+      expect(shadowCall).toBeDefined();
+      const shadowContent = JSON.parse(shadowCall?.[1] as string);
+      expect(shadowContent).toEqual({ mcpServers: {} });
     });
   });
 });

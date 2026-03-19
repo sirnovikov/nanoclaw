@@ -30,12 +30,12 @@ export interface McpBridgeDeps {
 
 interface JsonRpcRequest {
   jsonrpc: '2.0';
-  id: number | string;
+  id?: number | string;
   method: string;
   params?: unknown;
 }
 
-interface JsonRpcResponse {
+export interface JsonRpcResponse {
   jsonrpc: '2.0';
   id: number | string | null;
   result?: unknown;
@@ -62,12 +62,43 @@ const GATED_METHODS = new Set(['tools/call', 'resources/read']);
 const PERMISSION_TIMEOUT_MS = 30 * 60 * 1000; // 30 minutes
 
 export interface McpBridge {
-  handleJsonRpc: (request: JsonRpcRequest) => Promise<JsonRpcResponse>;
+  handleJsonRpc: (request: JsonRpcRequest) => Promise<JsonRpcResponse | null>;
   resolvePermission: (requestId: string, decision: string) => void;
   /** Start listening on a Unix socket. Returns cleanup function. */
   listen: (socketPath: string) => Promise<() => void>;
+  /** Start listening on a TCP port (localhost). Returns { port, cleanup }. */
+  listenTcp: () => Promise<{ port: number; cleanup: () => void }>;
   /** Cached tools list from handshake (for Haiku context). */
   readonly toolsList: unknown[] | null;
+}
+
+/**
+ * Extract JSON-RPC response from upstream body.
+ * Handles both plain JSON and SSE (text/event-stream) responses.
+ * SSE format: "event: message\ndata: {JSON}\n\n"
+ */
+export function parseUpstreamBody(body: string): JsonRpcResponse | null {
+  const trimmed = body.trim();
+  if (!trimmed) return null;
+
+  // Try plain JSON first
+  try {
+    return JSON.parse(trimmed) as JsonRpcResponse;
+  } catch {
+    // Not plain JSON — try SSE
+  }
+
+  // Parse SSE: extract the last "data:" line (which contains the JSON-RPC response)
+  for (const line of trimmed.split('\n').reverse()) {
+    if (line.startsWith('data: ')) {
+      try {
+        return JSON.parse(line.slice(6)) as JsonRpcResponse;
+      } catch {
+        // Malformed data line
+      }
+    }
+  }
+  return null;
 }
 
 export function createMcpBridge(
@@ -155,17 +186,20 @@ export function createMcpBridge(
 
   async function forwardToUpstream(
     request: JsonRpcRequest,
-  ): Promise<JsonRpcResponse> {
+  ): Promise<JsonRpcResponse | null> {
     const url = new URL(config.url);
     const body = JSON.stringify(request);
 
     const headers: Record<string, string> = {
       'content-type': 'application/json',
+      // MCP Streamable HTTP: must accept both JSON and SSE.
+      // Some servers (e.g. Vercel) reject requests that don't accept SSE.
+      accept: 'application/json, text/event-stream',
       'content-length': Buffer.byteLength(body).toString(),
       ...config.headers,
     };
 
-    return new Promise<JsonRpcResponse>((resolve) => {
+    return new Promise<JsonRpcResponse | null>((resolve) => {
       const proto = url.protocol === 'https:' ? https : http;
       const req = proto.request(
         {
@@ -179,13 +213,17 @@ export function createMcpBridge(
           const chunks: Buffer[] = [];
           res.on('data', (c: Buffer) => chunks.push(c));
           res.on('end', () => {
-            try {
-              const responseBody = Buffer.concat(chunks).toString();
-              resolve(JSON.parse(responseBody) as JsonRpcResponse);
-            } catch {
+            const responseBody = Buffer.concat(chunks).toString();
+            const parsed = parseUpstreamBody(responseBody);
+            if (parsed) {
+              resolve(parsed);
+            } else if (!responseBody.trim()) {
+              // Empty body (e.g. 202 for notifications)
+              resolve(null);
+            } else {
               resolve({
                 jsonrpc: '2.0',
-                id: request.id,
+                id: request.id ?? null,
                 error: { code: -32603, message: 'Invalid upstream response' },
               });
             }
@@ -195,7 +233,7 @@ export function createMcpBridge(
       req.on('error', (err: Error) => {
         resolve({
           jsonrpc: '2.0',
-          id: request.id,
+          id: request.id ?? null,
           error: { code: -32603, message: `Upstream error: ${err.message}` },
         });
       });
@@ -206,12 +244,27 @@ export function createMcpBridge(
 
   async function handleJsonRpc(
     request: JsonRpcRequest,
-  ): Promise<JsonRpcResponse> {
+  ): Promise<JsonRpcResponse | null> {
     const { method, params } = request;
+    const isNotification = request.id === undefined || request.id === null;
+
+    // Notifications (no id) are fire-and-forget — forward but don't return
+    // a response. The MCP stdio transport doesn't expect responses for
+    // notifications, and writing one would confuse the SDK.
+    if (isNotification) {
+      forwardToUpstream(request).catch((err) => {
+        logger.error(
+          { err, method, name: config.name },
+          'Bridge: notification forwarding failed',
+        );
+      });
+      return null;
+    }
 
     // Auto-allow safe methods
     if (AUTO_ALLOW_METHODS.has(method)) {
       const response = await forwardToUpstream(request);
+      if (!response) return null;
       // Cache tools list for Haiku context
       if (method === 'tools/list' && response.result) {
         const result = response.result as { tools?: unknown[] };
@@ -229,7 +282,7 @@ export function createMcpBridge(
       if (decision === 'deny') {
         return {
           jsonrpc: '2.0',
-          id: request.id,
+          id: request.id ?? null,
           error: {
             code: -32600,
             message: `Permission denied: ${buildSubject(method, (params ?? {}) as Record<string, unknown>)}`,
@@ -243,15 +296,8 @@ export function createMcpBridge(
     return forwardToUpstream(request);
   }
 
-  async function listen(socketPath: string): Promise<() => void> {
-    // Clean up stale socket
-    try {
-      fs.unlinkSync(socketPath);
-    } catch {
-      /* ignore */
-    }
-
-    const server = net.createServer((conn) => {
+  function createServer(): net.Server {
+    return net.createServer((conn) => {
       conn.on('error', (err) => {
         logger.error({ err, name: config.name }, 'Bridge: connection error');
       });
@@ -264,7 +310,10 @@ export function createMcpBridge(
         try {
           const request = JSON.parse(line) as JsonRpcRequest;
           const response = await handleJsonRpc(request);
-          conn.write(`${JSON.stringify(response)}\n`);
+          // Notifications (no id) return null — don't write anything back
+          if (response) {
+            conn.write(`${JSON.stringify(response)}\n`);
+          }
         } catch (err) {
           logger.error({ err }, 'Bridge: failed to process JSON-RPC message');
         }
@@ -293,6 +342,25 @@ export function createMcpBridge(
         void drain();
       });
     });
+  }
+
+  function cleanupPending(): void {
+    for (const [, pending] of pendingPermissions) {
+      clearTimeout(pending.timeout);
+      pending.resolve('deny');
+    }
+    pendingPermissions.clear();
+  }
+
+  async function listen(socketPath: string): Promise<() => void> {
+    // Clean up stale socket
+    try {
+      fs.unlinkSync(socketPath);
+    } catch {
+      /* ignore */
+    }
+
+    const server = createServer();
 
     await new Promise<void>((resolve, reject) => {
       server.on('error', reject);
@@ -308,11 +376,31 @@ export function createMcpBridge(
       } catch {
         /* ignore */
       }
-      for (const [, pending] of pendingPermissions) {
-        clearTimeout(pending.timeout);
-        pending.resolve('deny');
-      }
-      pendingPermissions.clear();
+      cleanupPending();
+    };
+  }
+
+  async function listenTcp(): Promise<{ port: number; cleanup: () => void }> {
+    const server = createServer();
+
+    await new Promise<void>((resolve, reject) => {
+      server.on('error', reject);
+      // Port 0 = OS assigns a random available port
+      server.listen(0, '127.0.0.1', () => resolve());
+    });
+
+    const addr = server.address() as net.AddressInfo;
+    logger.info(
+      { name: config.name, port: addr.port },
+      'MCP bridge listening (TCP)',
+    );
+
+    return {
+      port: addr.port,
+      cleanup: () => {
+        server.close();
+        cleanupPending();
+      },
     };
   }
 
@@ -320,6 +408,7 @@ export function createMcpBridge(
     handleJsonRpc,
     resolvePermission,
     listen,
+    listenTcp,
     get toolsList() {
       return toolsList;
     },

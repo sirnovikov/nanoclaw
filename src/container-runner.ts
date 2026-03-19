@@ -112,8 +112,11 @@ export function parseGroupMcpConfig(groupDir: string): ParsedMcpConfig {
 
 export function generateShadowMcpConfig(
   localServers: Record<string, McpServerConfig>,
-): string | null {
-  if (Object.keys(localServers).length === 0) return null;
+): string {
+  // Always write a shadow config, even if empty.
+  // This shadows the original .mcp.json so the container SDK doesn't
+  // see remote servers (which would bypass the bridge and fail due to
+  // network isolation).
   const shadow = { mcpServers: localServers };
   const tmpPath = path.join(
     os.tmpdir(),
@@ -446,7 +449,6 @@ export async function runContainerAgent(
 
   // MCP bridge setup: parse group's .mcp.json and spawn bridges for remote servers
   const bridgeCleanups: Array<() => void> = [];
-  let bridgeSocketDir: string | null = null;
   let shadowMcpPath: string | null = null;
   let inputWithBridges = input;
 
@@ -455,10 +457,7 @@ export async function runContainerAgent(
     const remoteNames = Object.keys(mcpConfig.remoteServers);
 
     if (remoteNames.length > 0) {
-      // Create temp directory for bridge sockets
-      bridgeSocketDir = fs.mkdtempSync(
-        path.join(os.tmpdir(), 'nanoclaw-bridge-'),
-      );
+      const bridgePorts: Record<string, number> = {};
 
       for (const name of remoteNames) {
         const remote = mcpConfig.remoteServers[name];
@@ -471,40 +470,39 @@ export async function runContainerAgent(
             chatJid: input.chatJid,
           },
         );
-        const socketPath = path.join(bridgeSocketDir, `${name}.sock`);
-        const cleanup = await bridge.listen(socketPath);
+        // Use TCP instead of Unix sockets — Unix sockets don't cross
+        // Docker Desktop's macOS VM boundary.
+        const { port, cleanup } = await bridge.listenTcp();
         bridgeCleanups.push(cleanup);
+        bridgePorts[name] = port;
       }
 
-      // Mount bridge socket dir into container
+      // Generate shadow .mcp.json with only local servers.
+      // Always mount — even if empty — so the SDK doesn't see remote
+      // servers from the original .mcp.json (they'd bypass the bridge).
+      shadowMcpPath = generateShadowMcpConfig(mcpConfig.localServers);
       mounts.push({
-        hostPath: bridgeSocketDir,
-        containerPath: '/bridge',
-        readonly: false,
+        hostPath: shadowMcpPath,
+        containerPath: '/workspace/group/.mcp.json',
+        readonly: true,
       });
 
-      // Generate shadow .mcp.json with only local servers
-      shadowMcpPath = generateShadowMcpConfig(mcpConfig.localServers);
-      if (shadowMcpPath) {
-        mounts.push({
-          hostPath: shadowMcpPath,
-          containerPath: '/workspace/group/.mcp.json',
-          readonly: true,
-        });
-      }
-
-      // Pass bridge configs in container input
+      // Pass bridge configs in container input.
+      // Container connects to host via host.docker.internal:PORT.
       inputWithBridges = {
         ...input,
         mcpBridges: remoteNames.map((name) => ({
           name,
           command: 'node',
-          args: ['/tmp/dist/bridge-client.js', `/bridge/${name}.sock`],
+          args: [
+            '/tmp/dist/bridge-client.js',
+            `host.docker.internal:${bridgePorts[name]}`,
+          ],
         })),
       };
 
       logger.info(
-        { group: group.name, bridges: remoteNames },
+        { group: group.name, bridges: remoteNames, bridgePorts },
         'MCP bridges spawned for remote servers',
       );
     }
@@ -552,13 +550,6 @@ export async function runContainerAgent(
     if (shadowMcpPath) {
       try {
         fs.unlinkSync(shadowMcpPath);
-      } catch {
-        /* ignore */
-      }
-    }
-    if (bridgeSocketDir) {
-      try {
-        fs.rmSync(bridgeSocketDir, { recursive: true, force: true });
       } catch {
         /* ignore */
       }

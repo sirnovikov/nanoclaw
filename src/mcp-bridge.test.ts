@@ -15,6 +15,7 @@ vi.mock('./permission-rule-generator.js', () => ({
 import { checkPermissionRule } from './permission-rule-engine/rule-engine.js';
 import {
   createMcpBridge,
+  parseUpstreamBody,
   type McpBridgeDeps,
   type BridgeConfig,
 } from './mcp-bridge.js';
@@ -167,7 +168,8 @@ describe('MCP bridge permission gating', () => {
 
     await vi.advanceTimersByTimeAsync(30 * 60 * 1000 + 1);
     const response = await resultPromise;
-    expect(response.error?.message).toContain('denied');
+    expect(response).not.toBeNull();
+    expect(response?.error?.message).toContain('denied');
     vi.useRealTimers();
   });
 
@@ -184,7 +186,8 @@ describe('MCP bridge permission gating', () => {
       method: 'tools/call',
       params: { name: 'deploy', arguments: {} },
     });
-    expect(response.error?.message).toContain('denied');
+    expect(response).not.toBeNull();
+    expect(response?.error?.message).toContain('denied');
   });
 
   it('forwards unknown methods without permission check', async () => {
@@ -196,5 +199,91 @@ describe('MCP bridge permission gating', () => {
       params: {},
     });
     expect(checkPermissionRule).not.toHaveBeenCalled();
+  });
+
+  it('returns null for notifications (no id)', async () => {
+    const bridge = createMcpBridge(testConfig, makeDeps());
+    const response = await bridge.handleJsonRpc({
+      jsonrpc: '2.0',
+      method: 'notifications/initialized',
+      params: {},
+    });
+    expect(response).toBeNull();
+  });
+
+  it('returns null for notification in auto-allow list', async () => {
+    const bridge = createMcpBridge(testConfig, makeDeps());
+    const response = await bridge.handleJsonRpc({
+      jsonrpc: '2.0',
+      method: 'notifications/initialized',
+    });
+    expect(response).toBeNull();
+  });
+});
+
+describe('parseUpstreamBody', () => {
+  it('parses plain JSON response', () => {
+    const body = '{"jsonrpc":"2.0","id":1,"result":{"tools":[]}}';
+    const result = parseUpstreamBody(body);
+    expect(result).toEqual({
+      jsonrpc: '2.0',
+      id: 1,
+      result: { tools: [] },
+    });
+  });
+
+  it('parses SSE response (event: message + data: line)', () => {
+    const body =
+      'event: message\ndata: {"jsonrpc":"2.0","id":1,"result":{"tools":[]}}\n\n';
+    const result = parseUpstreamBody(body);
+    expect(result).toEqual({
+      jsonrpc: '2.0',
+      id: 1,
+      result: { tools: [] },
+    });
+  });
+
+  it('parses SSE with multiple events (takes last data line)', () => {
+    const body = [
+      'event: message',
+      'data: {"jsonrpc":"2.0","id":1,"result":{"partial":true}}',
+      '',
+      'event: message',
+      'data: {"jsonrpc":"2.0","id":1,"result":{"tools":["final"]}}',
+      '',
+    ].join('\n');
+    const result = parseUpstreamBody(body);
+    // Takes last data line (reverse iteration)
+    expect(result).toEqual({
+      jsonrpc: '2.0',
+      id: 1,
+      result: { tools: ['final'] },
+    });
+  });
+
+  it('returns null for empty body', () => {
+    expect(parseUpstreamBody('')).toBeNull();
+    expect(parseUpstreamBody('  \n  ')).toBeNull();
+  });
+
+  it('returns null for non-JSON non-SSE body', () => {
+    expect(parseUpstreamBody('Not Acceptable')).toBeNull();
+  });
+
+  it('handles SSE with malformed data lines gracefully', () => {
+    const body = 'event: message\ndata: {broken json\n\n';
+    expect(parseUpstreamBody(body)).toBeNull();
+  });
+
+  it('parses Vercel-style SSE response exactly', () => {
+    // Real Vercel MCP response format observed via curl
+    const body =
+      'event: message\ndata: {"result":{"protocolVersion":"2024-11-05","capabilities":{"tools":{}},"serverInfo":{"name":"vercel","version":"1.0.0"}},"jsonrpc":"2.0","id":1}\n\n';
+    const result = parseUpstreamBody(body);
+    expect(result).not.toBeNull();
+    expect(result?.jsonrpc).toBe('2.0');
+    expect(result?.id).toBe(1);
+    const res = result?.result as { serverInfo: { name: string } };
+    expect(res.serverInfo.name).toBe('vercel');
   });
 });
