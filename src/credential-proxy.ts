@@ -160,7 +160,7 @@ export function resolvePermission(
   pendingPermissions.delete(requestId);
 }
 
-async function checkWithApproval(
+export async function checkWithApproval(
   egressType: EgressType,
   subject: string,
   groupFolder: string,
@@ -245,7 +245,7 @@ function openTunnel(
 export function startCredentialProxy(
   port: number,
   host = '127.0.0.1',
-  approvalCallbacks?: PermissionApprovalCallbacks,
+  approvalCallbacks: PermissionApprovalCallbacks,
 ): Promise<Server> {
   const secrets = readEnvFile([
     'ANTHROPIC_API_KEY',
@@ -287,7 +287,7 @@ export function startCredentialProxy(
         const isAnthropicReq = isDirectApiRequest || isAnthropicHost(reqHost);
 
         // Permission check for non-Anthropic HTTP traffic
-        if (!isAnthropicReq && approvalCallbacks) {
+        if (!isAnthropicReq) {
           const group = approvalCallbacks.resolveGroup(
             req.socket.remoteAddress ?? '',
           );
@@ -387,7 +387,7 @@ export function startCredentialProxy(
         isAnthropicHost(connectHostname) ||
         connectHostname === upstreamUrl.hostname;
 
-      if (isAnthropicConnect || !approvalCallbacks) {
+      if (isAnthropicConnect) {
         openTunnel(connectHost, clientSocket, head);
         return;
       }

@@ -319,7 +319,7 @@ async function runAgent(
         chatJid,
         isMain,
         assistantName: ASSISTANT_NAME,
-        permissionApproval: group.containerConfig?.permissionApproval,
+
       },
       (proc, containerName) =>
         queue.registerProcess(chatJid, proc, containerName, group.folder),

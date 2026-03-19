@@ -106,17 +106,13 @@ vi.mock('./container-group-registry.js', () => ({
   _clearRegistry: vi.fn(),
 }));
 
-import { spawn } from 'node:child_process';
+import { exec, spawn } from 'node:child_process';
 import fs from 'node:fs';
 import {
   deregisterContainerGroup,
   registerContainerGroup,
 } from './container-group-registry.js';
-import {
-  type ContainerOutput,
-  extractRemoteMcpHosts,
-  runContainerAgent,
-} from './container-runner.js';
+import { type ContainerOutput, runContainerAgent } from './container-runner.js';
 import type { RegisteredGroup } from './types.js';
 
 const testGroup: RegisteredGroup = {
@@ -124,11 +120,6 @@ const testGroup: RegisteredGroup = {
   folder: 'test-group',
   trigger: '@Andy',
   added_at: new Date().toISOString(),
-};
-
-const testGroupWithPermissionApproval: RegisteredGroup = {
-  ...testGroup,
-  containerConfig: { permissionApproval: true },
 };
 
 const testInput = {
@@ -146,7 +137,7 @@ function emitOutputMarker(
   proc.stdout.push(`${OUTPUT_START_MARKER}\n${json}\n${OUTPUT_END_MARKER}\n`);
 }
 
-describe('container-runner spawn args', () => {
+describe('container-runner spawn args (always locked down)', () => {
   beforeEach(() => {
     vi.useFakeTimers();
     fakeProc = createFakeProcess();
@@ -156,10 +147,12 @@ describe('container-runner spawn args', () => {
     vi.useRealTimers();
   });
 
-  /** Run the container to completion and return the spawn args. */
-  async function spawnArgsFor(group: RegisteredGroup): Promise<string[]> {
+  /** Spawn the container and return the spawn args. */
+  async function spawnGroup(group: RegisteredGroup): Promise<void> {
     vi.mocked(spawn).mockClear();
     const resultPromise = runContainerAgent(group, testInput, () => {});
+    // Let IP registration resolve
+    await vi.advanceTimersByTimeAsync(10);
     emitOutputMarker(fakeProc, {
       status: 'success',
       result: 'ok',
@@ -169,6 +162,11 @@ describe('container-runner spawn args', () => {
     fakeProc.emit('close', 0);
     await vi.advanceTimersByTimeAsync(10);
     await resultPromise;
+  }
+
+  /** Run the container to completion and return the spawn args. */
+  async function spawnArgsFor(group: RegisteredGroup): Promise<string[]> {
+    await spawnGroup(group);
     return [...(vi.mocked(spawn).mock.calls[0]?.[1] ?? [])];
   }
 
@@ -187,88 +185,150 @@ describe('container-runner spawn args', () => {
     return result;
   }
 
-  it('includes host.docker.internal in NO_PROXY when permissionApproval is true', async () => {
-    const args = await spawnArgsFor(testGroupWithPermissionApproval);
-    const env = envArgs(args);
-    expect(env.NO_PROXY).toContain('host.docker.internal');
-    expect(env.no_proxy).toContain('host.docker.internal');
+  it('always uses nanoclaw-proxy network', async () => {
+    const group = { ...testGroup, containerConfig: undefined };
+    const args = await spawnArgsFor(group);
+    expect(args).toContain('--network');
+    expect(args).toContain('nanoclaw-proxy');
   });
 
-  it('sets HTTP_PROXY and HTTPS_PROXY to credential proxy URL when permissionApproval is true', async () => {
-    const args = await spawnArgsFor(testGroupWithPermissionApproval);
-    const env = envArgs(args);
-    expect(env.HTTP_PROXY).toMatch(/^http:\/\/host\.docker\.internal:\d+$/);
-    expect(env.HTTPS_PROXY).toMatch(/^http:\/\/host\.docker\.internal:\d+$/);
-    expect(env.http_proxy).toMatch(/^http:\/\/host\.docker\.internal:\d+$/);
-    expect(env.https_proxy).toMatch(/^http:\/\/host\.docker\.internal:\d+$/);
+  it('always drops all capabilities', async () => {
+    const group = { ...testGroup, containerConfig: undefined };
+    const args = await spawnArgsFor(group);
+    expect(args).toContain('--cap-drop');
+    expect(args).toContain('ALL');
   });
 
-  it('attaches nanoclaw-proxy network when permissionApproval is true', async () => {
-    const args = await spawnArgsFor(testGroupWithPermissionApproval);
-    const networkIdx = args.indexOf('--network');
-    expect(networkIdx).not.toBe(-1);
-    expect(args[networkIdx + 1]).toBe('nanoclaw-proxy');
+  it('always sets no-new-privileges', async () => {
+    const group = { ...testGroup, containerConfig: undefined };
+    const args = await spawnArgsFor(group);
+    expect(args).toContain('--security-opt');
+    expect(args).toContain('no-new-privileges');
   });
 
-  it('adds host.docker.internal host entry when permissionApproval is true', async () => {
-    const args = await spawnArgsFor(testGroupWithPermissionApproval);
+  it('always sets HTTP_PROXY to credential proxy', async () => {
+    const group = { ...testGroup, containerConfig: undefined };
+    const args = await spawnArgsFor(group);
+    const joined = args.join(' ');
+    expect(joined).toMatch(/HTTP_PROXY=http:\/\//);
+    expect(joined).toMatch(/HTTPS_PROXY=http:\/\//);
+  });
+
+  it('always adds host.docker.internal host entry', async () => {
+    const group = { ...testGroup, containerConfig: undefined };
+    const args = await spawnArgsFor(group);
     const addHostIdx = args.indexOf('--add-host');
     expect(addHostIdx).not.toBe(-1);
     expect(args[addHostIdx + 1]).toBe('host.docker.internal:host-gateway');
   });
 
-  it('drops all capabilities and disables privilege escalation when permissionApproval is true', async () => {
-    const args = await spawnArgsFor(testGroupWithPermissionApproval);
-    const capDropIdx = args.indexOf('--cap-drop');
-    expect(capDropIdx).not.toBe(-1);
-    expect(args[capDropIdx + 1]).toBe('ALL');
-    expect(args).toContain('no-new-privileges');
-  });
-
-  it('does not drop capabilities when permissionApproval is false', async () => {
-    const args = await spawnArgsFor(testGroup);
-    expect(args).not.toContain('--cap-drop');
-    expect(args).not.toContain('no-new-privileges');
-  });
-
-  it('does not inject credential proxy vars when permissionApproval is false', async () => {
-    const args = await spawnArgsFor(testGroup);
+  it('NO_PROXY is localhost,127.0.0.1,host.docker.internal', async () => {
+    const group = { ...testGroup, containerConfig: undefined };
+    const args = await spawnArgsFor(group);
     const env = envArgs(args);
-    // When permissionApproval is false, the credential proxy URL (host.docker.internal)
-    // must NOT be injected. A system-level proxy may still appear from process.env.
-    expect(env.HTTP_PROXY ?? '').not.toMatch(/host\.docker\.internal/);
-    expect(env.HTTPS_PROXY ?? '').not.toMatch(/host\.docker\.internal/);
+    expect(env.NO_PROXY).toBe('localhost,127.0.0.1,host.docker.internal');
+    expect(env.no_proxy).toBe('localhost,127.0.0.1,host.docker.internal');
   });
 
-  it('registers container IP in group registry when permissionApproval is true', async () => {
+  it('does not include permission mounts (old IPC removed)', async () => {
+    const args = await spawnArgsFor(testGroup);
+    const argsStr = args.join(' ');
+    expect(argsStr).not.toContain('/ipc/permissions/requests');
+    expect(argsStr).not.toContain('/ipc/permissions/responses');
+  });
+});
+
+describe('container-runner IP registration', () => {
+  /** Store the original exec mock so we can restore after overriding */
+  let originalExecImpl: typeof exec;
+
+  beforeEach(() => {
+    vi.useFakeTimers();
+    fakeProc = createFakeProcess();
     vi.mocked(registerContainerGroup).mockClear();
-    await spawnArgsFor(testGroupWithPermissionApproval);
-    // Allow async IP lookup to complete
-    await vi.waitFor(() =>
-      expect(registerContainerGroup).toHaveBeenCalledWith(
-        '172.19.0.2',
-        expect.objectContaining({ groupFolder: testGroup.folder }),
-      ),
+    vi.mocked(deregisterContainerGroup).mockClear();
+    originalExecImpl = vi.mocked(exec).getMockImplementation() as typeof exec;
+  });
+
+  afterEach(() => {
+    // Restore the default exec mock so other describe blocks aren't affected
+    if (originalExecImpl) {
+      vi.mocked(exec).mockImplementation(originalExecImpl);
+    }
+    vi.useRealTimers();
+  });
+
+  it('always registers container IP in group registry', async () => {
+    const resultPromise = runContainerAgent(testGroup, testInput, () => {});
+    await vi.advanceTimersByTimeAsync(10);
+    emitOutputMarker(fakeProc, {
+      status: 'success',
+      result: 'ok',
+      newSessionId: 's1',
+    });
+    await vi.advanceTimersByTimeAsync(10);
+    fakeProc.emit('close', 0);
+    await vi.advanceTimersByTimeAsync(10);
+    await resultPromise;
+
+    expect(registerContainerGroup).toHaveBeenCalledWith(
+      '172.19.0.2',
+      expect.objectContaining({ groupFolder: testGroup.folder }),
     );
   });
 
   it('deregisters container IP when container exits', async () => {
-    vi.mocked(deregisterContainerGroup).mockClear();
-    await spawnArgsFor(testGroupWithPermissionApproval);
-    await vi.waitFor(() => expect(registerContainerGroup).toHaveBeenCalled());
-
+    const resultPromise = runContainerAgent(testGroup, testInput, () => {});
+    await vi.advanceTimersByTimeAsync(10);
+    emitOutputMarker(fakeProc, {
+      status: 'success',
+      result: 'ok',
+      newSessionId: 's1',
+    });
+    await vi.advanceTimersByTimeAsync(10);
     fakeProc.emit('close', 0);
+    await vi.advanceTimersByTimeAsync(10);
+    await resultPromise;
 
-    await vi.waitFor(() =>
-      expect(deregisterContainerGroup).toHaveBeenCalledWith('172.19.0.2'),
-    );
+    // The close listener registered by runContainerAgent deregisters the IP
+    expect(deregisterContainerGroup).toHaveBeenCalledWith('172.19.0.2');
   });
 
-  it('does not register IP when permissionApproval is false', async () => {
-    vi.mocked(registerContainerGroup).mockClear();
-    await spawnArgsFor(testGroup);
-    await vi.advanceTimersByTimeAsync(500);
-    expect(registerContainerGroup).not.toHaveBeenCalled();
+  it('throws when container IP registration fails', async () => {
+    // Make exec return null IP (error on every attempt)
+    vi.mocked(exec).mockImplementation(
+      ((
+        cmd: string,
+        optsOrCb?: unknown,
+        cb?: (err: Error | null, stdout: string, stderr: string) => void,
+      ) => {
+        const callback =
+          typeof optsOrCb === 'function'
+            ? (optsOrCb as (
+                err: Error | null,
+                stdout: string,
+                stderr: string,
+              ) => void)
+            : cb;
+        if (callback) {
+          callback(new Error('not found'), '', '');
+        }
+        return new EventEmitter();
+      }) as typeof exec,
+    );
+
+    // Capture the promise and prevent unhandled rejection warnings
+    const resultPromise = runContainerAgent(testGroup, testInput, () => {}).catch(
+      (e: unknown) => e,
+    );
+    // getContainerNetworkIp retries 5 times with increasing delays (300ms * attempt).
+    // Advance timers enough to exhaust all retry delays: 0 + 300 + 600 + 900 + 1200 = 3000ms
+    for (let i = 0; i < 10; i++) {
+      await vi.advanceTimersByTimeAsync(500);
+    }
+    const error = await resultPromise;
+    expect(error).toBeInstanceOf(Error);
+    expect((error as Error).message).toContain('failed to register network IP');
   });
 });
 
@@ -290,6 +350,9 @@ describe('container-runner timeout behavior', () => {
       () => {},
       onOutput,
     );
+
+    // Let IP registration resolve
+    await vi.advanceTimersByTimeAsync(10);
 
     // Emit output with a result
     emitOutputMarker(fakeProc, {
@@ -327,6 +390,9 @@ describe('container-runner timeout behavior', () => {
       onOutput,
     );
 
+    // Let IP registration resolve
+    await vi.advanceTimersByTimeAsync(10);
+
     // No output emitted — fire the hard timeout
     await vi.advanceTimersByTimeAsync(1830000);
 
@@ -350,6 +416,9 @@ describe('container-runner timeout behavior', () => {
       onOutput,
     );
 
+    // Let IP registration resolve
+    await vi.advanceTimersByTimeAsync(10);
+
     // Emit output
     emitOutputMarker(fakeProc, {
       status: 'success',
@@ -370,224 +439,6 @@ describe('container-runner timeout behavior', () => {
   });
 });
 
-describe('extractRemoteMcpHosts', () => {
-  beforeEach(() => {
-    vi.mocked(fs.existsSync).mockReturnValue(false);
-    vi.mocked(fs.readFileSync).mockReturnValue('');
-  });
-
-  it('returns empty array when no .mcp.json exists', () => {
-    expect(extractRemoteMcpHosts('/tmp/group')).toEqual([]);
-  });
-
-  it('returns empty array when no mcpServers key', () => {
-    vi.mocked(fs.existsSync).mockReturnValue(true);
-    vi.mocked(fs.readFileSync).mockReturnValue(JSON.stringify({}));
-    expect(extractRemoteMcpHosts('/tmp/group')).toEqual([]);
-  });
-
-  it('returns empty array for command-based servers (no url)', () => {
-    vi.mocked(fs.existsSync).mockReturnValue(true);
-    vi.mocked(fs.readFileSync).mockReturnValue(
-      JSON.stringify({
-        mcpServers: {
-          local: { command: 'node', args: ['server.js'] },
-        },
-      }),
-    );
-    expect(extractRemoteMcpHosts('/tmp/group')).toEqual([]);
-  });
-
-  it('extracts hostname from URL-based server', () => {
-    vi.mocked(fs.existsSync).mockReturnValue(true);
-    vi.mocked(fs.readFileSync).mockReturnValue(
-      JSON.stringify({
-        mcpServers: {
-          vercel: { url: 'https://mcp.vercel.com/sse' },
-        },
-      }),
-    );
-    expect(extractRemoteMcpHosts('/tmp/group')).toEqual(['mcp.vercel.com']);
-  });
-
-  it('extracts hostnames from multiple URL servers', () => {
-    vi.mocked(fs.existsSync).mockReturnValue(true);
-    vi.mocked(fs.readFileSync).mockReturnValue(
-      JSON.stringify({
-        mcpServers: {
-          vercel: { url: 'https://mcp.vercel.com/sse' },
-          github: { url: 'https://api.github.com/mcp' },
-          local: { command: 'node', args: ['server.js'] },
-        },
-      }),
-    );
-    const hosts = extractRemoteMcpHosts('/tmp/group');
-    expect(hosts).toContain('mcp.vercel.com');
-    expect(hosts).toContain('api.github.com');
-    expect(hosts).toHaveLength(2);
-  });
-
-  it('skips malformed URL without throwing', () => {
-    vi.mocked(fs.existsSync).mockReturnValue(true);
-    vi.mocked(fs.readFileSync).mockReturnValue(
-      JSON.stringify({
-        mcpServers: {
-          bad: { url: 'not-a-url' },
-          good: { url: 'https://mcp.vercel.com/sse' },
-        },
-      }),
-    );
-    expect(extractRemoteMcpHosts('/tmp/group')).toEqual(['mcp.vercel.com']);
-  });
-
-  it('returns empty array on invalid JSON', () => {
-    vi.mocked(fs.existsSync).mockReturnValue(true);
-    vi.mocked(fs.readFileSync).mockReturnValue('not-json{{{');
-    expect(extractRemoteMcpHosts('/tmp/group')).toEqual([]);
-  });
-});
-
-describe('buildContainerArgs with remote MCP hosts in NO_PROXY', () => {
-  beforeEach(() => {
-    vi.useFakeTimers();
-    fakeProc = createFakeProcess();
-  });
-
-  afterEach(() => {
-    vi.useRealTimers();
-  });
-
-  async function spawnArgsFor(group: RegisteredGroup): Promise<string[]> {
-    vi.mocked(spawn).mockClear();
-    const resultPromise = runContainerAgent(group, testInput, () => {});
-    emitOutputMarker(fakeProc, {
-      status: 'success',
-      result: 'ok',
-      newSessionId: 's1',
-    });
-    await vi.advanceTimersByTimeAsync(10);
-    fakeProc.emit('close', 0);
-    await vi.advanceTimersByTimeAsync(10);
-    await resultPromise;
-    return [...(vi.mocked(spawn).mock.calls[0]?.[1] ?? [])];
-  }
-
-  function envArgs(args: string[]): Record<string, string> {
-    const result: Record<string, string> = {};
-    for (let i = 0; i < args.length - 1; i++) {
-      const nextArg = args[i + 1];
-      if (args[i] === '-e' && nextArg !== undefined) {
-        const eq = nextArg.indexOf('=');
-        if (eq !== -1) {
-          result[nextArg.slice(0, eq)] = nextArg.slice(eq + 1);
-        }
-      }
-    }
-    return result;
-  }
-
-  it('includes remote MCP hosts in NO_PROXY when permissionApproval is true', async () => {
-    // Mock extractRemoteMcpHosts to return hosts by controlling fs reads
-    const origExistsSync = vi.mocked(fs.existsSync).getMockImplementation();
-    const origReadFileSync = vi.mocked(fs.readFileSync).getMockImplementation();
-
-    vi.mocked(fs.existsSync).mockImplementation((p) => {
-      if (String(p).endsWith('.mcp.json')) return true;
-      return false;
-    });
-    vi.mocked(fs.readFileSync).mockImplementation(((p: string) => {
-      if (String(p).endsWith('.mcp.json')) {
-        return JSON.stringify({
-          mcpServers: {
-            vercel: { url: 'https://mcp.vercel.com/sse' },
-          },
-        });
-      }
-      return '';
-    }) as typeof fs.readFileSync);
-
-    const args = await spawnArgsFor(testGroupWithPermissionApproval);
-    const env = envArgs(args);
-    expect(env.NO_PROXY).toContain('mcp.vercel.com');
-    expect(env.no_proxy).toContain('mcp.vercel.com');
-
-    // Restore
-    if (origExistsSync)
-      vi.mocked(fs.existsSync).mockImplementation(origExistsSync);
-    if (origReadFileSync)
-      vi.mocked(fs.readFileSync).mockImplementation(origReadFileSync);
-  });
-
-  it('NO_PROXY has base set only when no remote MCP hosts', async () => {
-    const args = await spawnArgsFor(testGroupWithPermissionApproval);
-    const env = envArgs(args);
-    expect(env.NO_PROXY).toBe('localhost,127.0.0.1,host.docker.internal');
-  });
-
-  it('does not set permission-approval NO_PROXY when permissionApproval is false', async () => {
-    const args = await spawnArgsFor(testGroup);
-    const env = envArgs(args);
-    // When permissionApproval is false, the NO_PROXY may come from host env passthrough
-    // but should NOT contain the permission-approval base set (localhost,127.0.0.1,host.docker.internal)
-    // as an exact match — it either inherits process.env or is absent
-    if (env.NO_PROXY) {
-      // Host env may have NO_PROXY — that's fine, but it shouldn't be the
-      // permission-approval-specific value
-      expect(env.NO_PROXY).not.toBe('localhost,127.0.0.1,host.docker.internal');
-    }
-  });
-});
-
-describe('permission volume mounts', () => {
-  beforeEach(() => {
-    vi.useFakeTimers();
-    fakeProc = createFakeProcess();
-  });
-
-  afterEach(() => {
-    vi.useRealTimers();
-  });
-
-  async function spawnArgsFor(group: RegisteredGroup): Promise<string[]> {
-    vi.mocked(spawn).mockClear();
-    const resultPromise = runContainerAgent(group, testInput, () => {});
-    emitOutputMarker(fakeProc, {
-      status: 'success',
-      result: 'ok',
-      newSessionId: 's1',
-    });
-    await vi.advanceTimersByTimeAsync(10);
-    fakeProc.emit('close', 0);
-    await vi.advanceTimersByTimeAsync(10);
-    await resultPromise;
-    return [...(vi.mocked(spawn).mock.calls[0]?.[1] ?? [])];
-  }
-
-  it('includes permission mounts when permissionApproval is true', async () => {
-    const args = await spawnArgsFor(testGroupWithPermissionApproval);
-    const argsStr = args.join(' ');
-    expect(argsStr).toContain('/ipc/permissions/requests');
-    expect(argsStr).toContain('/ipc/permissions/responses');
-  });
-
-  it('responses mount is read-only when permissionApproval is true', async () => {
-    const args = await spawnArgsFor(testGroupWithPermissionApproval);
-    // Find the responses mount — readonlyMountArgs returns ['-v', 'host:container:ro']
-    const responsesArg = args.find((a) =>
-      a.includes('/ipc/permissions/responses'),
-    );
-    expect(responsesArg).toBeDefined();
-    expect(responsesArg).toContain(':ro');
-  });
-
-  it('does not include permission mounts when permissionApproval is false', async () => {
-    const args = await spawnArgsFor(testGroup);
-    const argsStr = args.join(' ');
-    expect(argsStr).not.toContain('/ipc/permissions/requests');
-    expect(argsStr).not.toContain('/ipc/permissions/responses');
-  });
-});
-
 describe('agent-runner source mount', () => {
   beforeEach(() => {
     vi.useFakeTimers();
@@ -602,6 +453,7 @@ describe('agent-runner source mount', () => {
   async function spawnGroup(group: RegisteredGroup): Promise<void> {
     vi.mocked(spawn).mockClear();
     const resultPromise = runContainerAgent(group, testInput, () => {});
+    await vi.advanceTimersByTimeAsync(10);
     emitOutputMarker(fakeProc, {
       status: 'success',
       result: 'ok',

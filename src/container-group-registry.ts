@@ -1,9 +1,9 @@
 /**
  * Maps container bridge IP addresses to group identity.
  *
- * When a permissionApproval container starts, its IP on the nanoclaw-proxy
- * bridge is registered here. The credential proxy calls resolveContainerGroup
- * with req.socket.remoteAddress to identify which group's container is making
+ * When a container starts, its IP on the nanoclaw-proxy bridge is registered
+ * here. The credential proxy calls resolveContainerGroup with
+ * req.socket.remoteAddress to identify which group's container is making
  * a request, so it can send the Telegram approval message to the right chat.
  */
 

@@ -2,7 +2,7 @@
  * Container Runner for NanoClaw
  * Spawns agent execution in containers and handles IPC
  */
-import { type ChildProcess, exec, spawn } from 'node:child_process';
+import { type ChildProcess, exec, execSync, spawn } from 'node:child_process';
 import fs from 'node:fs';
 import path from 'node:path';
 
@@ -45,7 +45,6 @@ export interface ContainerInput {
   isMain: boolean;
   isScheduledTask?: boolean;
   assistantName?: string;
-  permissionApproval?: boolean;
 }
 
 export interface ContainerOutput {
@@ -186,48 +185,19 @@ function buildVolumeMounts(
     readonly: false,
   });
 
-  // Permission approval IPC: split mounts — requests RW (hook writes), responses RO (host writes)
-  // These are separate from /workspace/ipc so Write/Edit tools cannot reach them.
-  // Only added when permissionApproval is enabled for this group.
-  if (group.containerConfig?.permissionApproval) {
-    const reqDir = path.join(groupIpcDir, 'permissions', 'requests');
-    const resDir = path.join(groupIpcDir, 'permissions', 'responses');
-    fs.mkdirSync(reqDir, { recursive: true });
-    fs.mkdirSync(resDir, { recursive: true });
-    mounts.push({
-      hostPath: reqDir,
-      containerPath: '/ipc/permissions/requests',
-      readonly: false,
-    });
-    mounts.push({
-      hostPath: resDir,
-      containerPath: '/ipc/permissions/responses',
-      readonly: true,
-    });
-  }
-
-  // Copy agent-runner source into a per-group writable location so agents
-  // can customize it (add tools, change behavior) without affecting other
-  // groups. Recompiled on container startup via entrypoint.sh.
+  // Mount canonical agent-runner source read-only. Every container gets the
+  // same trusted code — no per-group copies that can go stale or be tampered
+  // with. Recompiled on container startup via entrypoint.sh.
   const agentRunnerSrc = path.join(
     projectRoot,
     'container',
     'agent-runner',
     'src',
   );
-  const groupAgentRunnerDir = path.join(
-    DATA_DIR,
-    'sessions',
-    group.folder,
-    'agent-runner-src',
-  );
-  if (!fs.existsSync(groupAgentRunnerDir) && fs.existsSync(agentRunnerSrc)) {
-    fs.cpSync(agentRunnerSrc, groupAgentRunnerDir, { recursive: true });
-  }
   mounts.push({
-    hostPath: groupAgentRunnerDir,
+    hostPath: agentRunnerSrc,
     containerPath: '/app/src',
-    readonly: false,
+    readonly: true,
   });
 
   // Additional mounts validated against external allowlist (tamper-proof from containers)
@@ -246,7 +216,6 @@ function buildVolumeMounts(
 function buildContainerArgs(
   mounts: VolumeMount[],
   containerName: string,
-  permissionApproval: boolean,
 ): string[] {
   const args: string[] = ['run', '-i', '--rm', '--name', containerName];
 
@@ -255,10 +224,8 @@ function buildContainerArgs(
   // changes), which are the primitives needed to bypass HTTP_PROXY at the network
   // layer. Standard TCP connections (which honour proxy env vars) don't need caps.
   // --security-opt no-new-privileges blocks setuid/setgid escalation paths.
-  if (permissionApproval) {
-    args.push('--cap-drop', 'ALL');
-    args.push('--security-opt', 'no-new-privileges');
-  }
+  args.push('--cap-drop', 'ALL');
+  args.push('--security-opt', 'no-new-privileges');
 
   // Pass host timezone so container's local time matches the user's
   args.push('-e', `TZ=${TIMEZONE}`);
@@ -318,7 +285,7 @@ function buildContainerArgs(
     `ANTHROPIC_BASE_URL=http://${CONTAINER_HOST_GATEWAY}:${CREDENTIAL_PROXY_PORT}`,
   );
 
-  // Permission approval: attach to the nanoclaw-proxy bridge and route all
+  // Network isolation: attach to the nanoclaw-proxy bridge and route all
   // HTTP/HTTPS through the credential proxy.
   //
   // Network isolation strategy is platform-specific (see scripts/):
@@ -332,17 +299,16 @@ function buildContainerArgs(
   // 'host-gateway' resolves to the host IP as seen by the Docker runtime
   // (on macOS: the Mac host via Docker Desktop's tunnel; on Linux: the bridge
   // gateway). This makes host.docker.internal reachable on both platforms.
-  if (permissionApproval) {
-    args.push('--network', 'nanoclaw-proxy');
-    args.push('--add-host', 'host.docker.internal:host-gateway');
-    const proxyUrl = `http://${CONTAINER_HOST_GATEWAY}:${CREDENTIAL_PROXY_PORT}`;
-    args.push('-e', `HTTP_PROXY=${proxyUrl}`);
-    args.push('-e', `HTTPS_PROXY=${proxyUrl}`);
-    args.push('-e', `http_proxy=${proxyUrl}`);
-    args.push('-e', `https_proxy=${proxyUrl}`);
-    args.push('-e', `NO_PROXY=localhost,127.0.0.1,host.docker.internal`);
-    args.push('-e', `no_proxy=localhost,127.0.0.1,host.docker.internal`);
-  }
+  args.push('--network', 'nanoclaw-proxy');
+  args.push('--add-host', 'host.docker.internal:host-gateway');
+  const proxyUrl = `http://${CONTAINER_HOST_GATEWAY}:${CREDENTIAL_PROXY_PORT}`;
+  args.push('-e', `HTTP_PROXY=${proxyUrl}`);
+  args.push('-e', `HTTPS_PROXY=${proxyUrl}`);
+  args.push('-e', `http_proxy=${proxyUrl}`);
+  args.push('-e', `https_proxy=${proxyUrl}`);
+  const noProxy = 'localhost,127.0.0.1,host.docker.internal';
+  args.push('-e', `NO_PROXY=${noProxy}`);
+  args.push('-e', `no_proxy=${noProxy}`);
 
   // Mirror the host's auth method with a placeholder value.
   // API key mode: SDK sends x-api-key, proxy replaces with real key.
@@ -409,11 +375,7 @@ export async function runContainerAgent(
   const mounts = buildVolumeMounts(group, input.isMain);
   const safeName = group.folder.replace(/[^a-zA-Z0-9-]/g, '-');
   const containerName = `nanoclaw-${safeName}-${Date.now()}`;
-  const containerArgs = buildContainerArgs(
-    mounts,
-    containerName,
-    group.containerConfig?.permissionApproval ?? false,
-  );
+  const containerArgs = buildContainerArgs(mounts, containerName);
 
   logger.debug(
     {
@@ -441,39 +403,31 @@ export async function runContainerAgent(
   const logsDir = path.join(groupDir, 'logs');
   fs.mkdirSync(logsDir, { recursive: true });
 
+  const container = spawn(CONTAINER_RUNTIME_BIN, containerArgs, {
+    stdio: ['pipe', 'pipe', 'pipe'],
+  });
+
+  onProcess(container, containerName);
+
+  // Register container IP — MUST succeed before agent starts
+  const containerIp = await getContainerNetworkIp(containerName);
+  if (!containerIp) {
+    logger.error({ containerName }, 'Failed to get container IP — agent cannot use network');
+    try { execSync(`docker kill ${containerName}`, { stdio: 'ignore' }); } catch { /* ignore */ }
+    throw new Error(`Container ${containerName} failed to register network IP`);
+  }
+  registerContainerGroup(containerIp, { groupFolder: group.folder, chatJid: input.chatJid });
+  container.once('close', () => deregisterContainerGroup(containerIp));
+
+  // Write input and wait for completion
+  container.stdin.write(JSON.stringify(input));
+  container.stdin.end();
+
   return new Promise((resolve) => {
-    const container = spawn(CONTAINER_RUNTIME_BIN, containerArgs, {
-      stdio: ['pipe', 'pipe', 'pipe'],
-    });
-
-    onProcess(container, containerName);
-
-    // Register container IP for resolveGroup after spawn (permissionApproval only)
-    if (group.containerConfig?.permissionApproval) {
-      void (async () => {
-        const ip = await getContainerNetworkIp(containerName);
-        if (ip) {
-          registerContainerGroup(ip, {
-            groupFolder: group.folder,
-            chatJid: input.chatJid,
-          });
-          container.once('close', () => deregisterContainerGroup(ip));
-        } else {
-          logger.warn(
-            { group: group.name, containerName },
-            'Could not resolve container IP for group registry',
-          );
-        }
-      })();
-    }
-
     let stdout = '';
     let stderr = '';
     let stdoutTruncated = false;
     let stderrTruncated = false;
-
-    container.stdin.write(JSON.stringify(input));
-    container.stdin.end();
 
     // Streaming output: parse OUTPUT_START/END marker pairs as they arrive
     let parseBuffer = '';

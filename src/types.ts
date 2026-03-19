@@ -30,7 +30,7 @@ export interface AllowedRoot {
 export interface ContainerConfig {
   additionalMounts?: AdditionalMount[];
   timeout?: number; // Default: 300000 (5 minutes)
-  permissionApproval?: boolean; // If true, agent runs with default permission mode and routes approvals via Telegram
+
 }
 
 export interface RegisteredGroup {
