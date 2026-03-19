@@ -33,6 +33,7 @@ import { detectAuthMode } from './credential-proxy.js';
 import { resolveGroupFolderPath, resolveGroupIpcPath } from './group-folder.js';
 import { logger } from './logger.js';
 import { createMcpBridge } from './mcp-bridge.js';
+import type { DecisionHistoryEntry } from './permission-rule-generator.js';
 import { validateAdditionalMounts } from './mount-security.js';
 import type { RegisteredGroup } from './types.js';
 
@@ -60,6 +61,7 @@ export interface ContainerOutput {
 
 export interface BridgePermissionDeps {
   sendPermissionRequest: (req: PermissionRequest) => Promise<number | null>;
+  getDecisionHistory: () => DecisionHistoryEntry[];
 }
 
 interface McpServerConfig {
@@ -466,6 +468,7 @@ export async function runContainerAgent(
           { name, url: remote.url, headers: remote.headers },
           {
             sendPermissionRequest: bridgeDeps.sendPermissionRequest,
+            getDecisionHistory: bridgeDeps.getDecisionHistory,
             groupFolder: group.folder,
             chatJid: input.chatJid,
           },

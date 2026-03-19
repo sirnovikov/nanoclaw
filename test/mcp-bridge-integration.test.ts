@@ -23,6 +23,7 @@ vi.mock('../src/env.js', () => ({
 vi.mock('../src/db.js', () => ({
   _initTestDatabase: vi.fn(),
   insertPermissionRule: vi.fn(),
+  logPermissionDecision: vi.fn(),
   getDb: vi.fn(),
 }));
 
@@ -42,6 +43,7 @@ import { insertPermissionRule } from '../src/db.js';
 function makeDeps(overrides?: Partial<McpBridgeDeps>): McpBridgeDeps {
   return {
     sendPermissionRequest: vi.fn().mockResolvedValue(42),
+    getDecisionHistory: vi.fn().mockReturnValue([]),
     groupFolder: 'test-group',
     chatJid: 'tg:123',
     ...overrides,
@@ -296,7 +298,8 @@ describe.skipIf(!canListen)('Permission approval flow (bridge â†’ Telegram sim â
     );
     (generateRuleProposal as ReturnType<typeof vi.fn>).mockResolvedValue({
       name: 'Allow Vercel deploy',
-      pattern: 'mcp__vercel__deploy',
+      patterns: ['mcp__vercel__deploy'],
+      effect: 'allow',
       scope: 'global',
       description: 'Allow deploying via Vercel MCP',
     });

@@ -28,12 +28,25 @@ export function deregisterContainerGroup(ip: string): void {
 /**
  * Look up the group for a connection's remote address.
  * Handles IPv4-mapped IPv6 addresses (::ffff:172.19.0.2 → 172.19.0.2).
+ *
+ * On Docker Desktop macOS, host.docker.internal traffic arrives as 127.0.0.1
+ * (not the container's bridge IP), so IP-based lookup fails. When exactly one
+ * container is registered, we fall back to returning it for loopback addresses.
  */
 export function resolveContainerGroup(
   remoteAddress: string,
 ): ContainerGroupEntry | null {
   const ip = remoteAddress.replace(/^::ffff:/, '');
-  return registry.get(ip) ?? null;
+  const direct = registry.get(ip);
+  if (direct) return direct;
+
+  // Docker Desktop macOS fallback: loopback + single container
+  if ((ip === '127.0.0.1' || ip === '::1') && registry.size === 1) {
+    const [entry] = registry.values();
+    return entry ?? null;
+  }
+
+  return null;
 }
 
 /** @internal — for tests only */

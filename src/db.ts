@@ -110,6 +110,17 @@ function createSchema(database: Database.Database): void {
     );
     CREATE INDEX IF NOT EXISTS idx_permission_rules_lookup
       ON permission_rules(egress_type, scope, group_folder, effect);
+
+    CREATE TABLE IF NOT EXISTS permission_audit_log (
+      id            INTEGER PRIMARY KEY AUTOINCREMENT,
+      egress_type   TEXT NOT NULL,
+      subject       TEXT NOT NULL,
+      decision      TEXT NOT NULL,
+      group_folder  TEXT NOT NULL,
+      created_at    TEXT NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS idx_permission_audit_group
+      ON permission_audit_log(group_folder, created_at DESC);
   `);
 
   // Add context_mode column if it doesn't exist (migration for existing DBs)
@@ -749,6 +760,47 @@ export function incrementRuleMatchCount(id: string): void {
   db.prepare(
     `UPDATE permission_rules SET match_count = match_count + 1 WHERE id = ?`,
   ).run(id);
+}
+
+export interface PermissionAuditEntry {
+  egress_type: string;
+  subject: string;
+  decision: string;
+  group_folder: string;
+  created_at: string;
+}
+
+export function logPermissionDecision(entry: {
+  egress_type: string;
+  subject: string;
+  decision: string;
+  group_folder: string;
+}): void {
+  db.prepare(
+    `INSERT INTO permission_audit_log (egress_type, subject, decision, group_folder, created_at)
+     VALUES (?, ?, ?, ?, ?)`,
+  ).run(
+    entry.egress_type,
+    entry.subject,
+    entry.decision,
+    entry.group_folder,
+    new Date().toISOString(),
+  );
+}
+
+export function getRecentPermissionDecisions(
+  groupFolder: string,
+  limit = 20,
+): PermissionAuditEntry[] {
+  return db
+    .prepare(
+      `SELECT egress_type, subject, decision, group_folder, created_at
+       FROM permission_audit_log
+       WHERE group_folder = ?
+       ORDER BY created_at DESC
+       LIMIT ?`,
+    )
+    .all(groupFolder, limit) as PermissionAuditEntry[];
 }
 
 // --- JSON migration ---

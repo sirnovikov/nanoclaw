@@ -21,18 +21,21 @@ function getMockCreate(): ReturnType<typeof vi.fn> {
   return mockCreate;
 }
 
-function makeValidResponse(overrides: Record<string, unknown> = {}) {
+function makeToolUseResponse(overrides: Record<string, unknown> = {}) {
   return {
     content: [
       {
-        type: 'text',
-        text: JSON.stringify({
+        type: 'tool_use',
+        id: 'toolu_test',
+        name: 'propose_rule',
+        input: {
           name: 'Allow OpenAI API',
-          pattern: 'https://api.openai.com/*',
+          patterns: ['https://api.openai.com/*'],
+          effect: 'allow',
           scope: 'global',
           description: 'Allow requests to the OpenAI API.',
           ...overrides,
-        }),
+        },
       },
     ],
   };
@@ -103,7 +106,8 @@ describe('validateProposal', () => {
     const result = validateProposal(
       {
         name: 'Allow OpenAI API',
-        pattern: 'https://api.openai.com/*',
+        patterns: ['https://api.openai.com/*'],
+        effect: 'allow',
         scope: 'global',
         description: 'Allow requests to the OpenAI API.',
       },
@@ -118,7 +122,8 @@ describe('validateProposal', () => {
       validateProposal(
         {
           name: 'A'.repeat(41),
-          pattern: 'https://api.openai.com/*',
+          patterns: ['https://api.openai.com/*'],
+          effect: 'allow',
           scope: 'global',
           description: 'desc',
         },
@@ -132,7 +137,8 @@ describe('validateProposal', () => {
       validateProposal(
         {
           name: 'Allow all',
-          pattern: '*',
+          patterns: ['*'],
+          effect: 'allow',
           scope: 'global',
           description: 'desc',
         },
@@ -146,7 +152,8 @@ describe('validateProposal', () => {
       validateProposal(
         {
           name: 'Allow all',
-          pattern: '**',
+          patterns: ['**'],
+          effect: 'allow',
           scope: 'global',
           description: 'desc',
         },
@@ -160,7 +167,8 @@ describe('validateProposal', () => {
       validateProposal(
         {
           name: 'Allow all',
-          pattern: '*:*',
+          patterns: ['*:*'],
+          effect: 'allow',
           scope: 'global',
           description: 'desc',
         },
@@ -174,7 +182,8 @@ describe('validateProposal', () => {
       validateProposal(
         {
           name: 'Allow all',
-          pattern: '*:443',
+          patterns: ['*:443'],
+          effect: 'allow',
           scope: 'global',
           description: 'desc',
         },
@@ -188,7 +197,8 @@ describe('validateProposal', () => {
       validateProposal(
         {
           name: 'Allow X',
-          pattern: 'https://example.com/*',
+          patterns: ['https://example.com/*'],
+          effect: 'allow',
           scope: 'team',
           description: 'desc',
         },
@@ -202,7 +212,8 @@ describe('validateProposal', () => {
       validateProposal(
         {
           name: 'Allow GitHub',
-          pattern: '*.github.com',
+          patterns: ['*.github.com'],
+          effect: 'allow',
           scope: 'global',
           description: 'desc',
         },
@@ -216,7 +227,8 @@ describe('validateProposal', () => {
       validateProposal(
         {
           name: 'Allow GitHub',
-          pattern: '*.github.com:443',
+          patterns: ['*.github.com:443'],
+          effect: 'allow',
           scope: 'global',
           description: 'desc',
         },
@@ -230,7 +242,8 @@ describe('validateProposal', () => {
       validateProposal(
         {
           name: 'Allow tool',
-          pattern: 'nanoclaw__send_message',
+          patterns: ['nanoclaw__send_message'],
+          effect: 'allow',
           scope: 'group',
           description: 'desc',
         },
@@ -244,7 +257,8 @@ describe('validateProposal', () => {
       validateProposal(
         {
           name: 'Allow send',
-          pattern: 'mcp__nanoclaw__send_message',
+          patterns: ['mcp__nanoclaw__send_message'],
+          effect: 'allow',
           scope: 'group',
           description: 'desc',
         },
@@ -262,17 +276,34 @@ describe('validateProposal', () => {
   it('rejects proposal with missing fields', () => {
     expect(
       validateProposal(
-        { name: 'Allow X', pattern: 'https://example.com/*' },
+        { name: 'Allow X', patterns: ['https://example.com/*'] },
+        'http',
+      ),
+    ).toBeNull();
+  });
+
+  it('rejects empty string fields', () => {
+    expect(
+      validateProposal(
+        { name: '', patterns: ['https://x.com/*'], effect: 'allow', scope: 'global', description: 'desc' },
+        'http',
+      ),
+    ).toBeNull();
+  });
+
+  it('rejects pattern > 200 chars', () => {
+    expect(
+      validateProposal(
+        { name: 'Long', patterns: ['x'.repeat(201)], effect: 'allow', scope: 'global', description: 'desc' },
         'http',
       ),
     ).toBeNull();
   });
 });
 
-describe('generateRuleProposal', () => {
-  it('returns RuleProposal on valid Haiku response', async () => {
-    const mockCreate = getMockCreate();
-    mockCreate.mockResolvedValueOnce(makeValidResponse());
+describe('generateRuleProposal (mocked)', () => {
+  it('returns RuleProposal from tool_use response', async () => {
+    getMockCreate().mockResolvedValueOnce(makeToolUseResponse());
 
     const result = await generateRuleProposal(
       'http',
@@ -281,17 +312,28 @@ describe('generateRuleProposal', () => {
 
     expect(result).not.toBeNull();
     expect(result?.name).toBe('Allow OpenAI API');
-    expect(result?.pattern).toBe('https://api.openai.com/*');
+    expect(result?.patterns).toEqual(['https://api.openai.com/*']);
+    expect(result?.effect).toBe('allow');
     expect(result?.scope).toBe('global');
   });
 
-  it('passes HTML-escaped subject inside <request> delimiters to Haiku', async () => {
-    const mockCreate = getMockCreate();
-    mockCreate.mockResolvedValueOnce(makeValidResponse());
+  it('sends tool_choice forcing propose_rule tool', async () => {
+    getMockCreate().mockResolvedValueOnce(makeToolUseResponse());
+
+    await generateRuleProposal('mcp', 'mcp__vercel__list_teams');
+
+    const callArgs = getMockCreate().mock.calls[0]?.[0];
+    expect(callArgs.tools).toHaveLength(1);
+    expect(callArgs.tools[0].name).toBe('propose_rule');
+    expect(callArgs.tool_choice).toEqual({ type: 'tool', name: 'propose_rule' });
+  });
+
+  it('passes HTML-escaped subject inside <request> delimiters', async () => {
+    getMockCreate().mockResolvedValueOnce(makeToolUseResponse());
 
     await generateRuleProposal('http', 'https://evil.com/<injected>');
 
-    const callArgs = mockCreate.mock.calls[0]?.[0];
+    const callArgs = getMockCreate().mock.calls[0]?.[0];
     const promptContent = callArgs.messages[0].content as string;
 
     expect(promptContent).toContain('<request>');
@@ -300,8 +342,7 @@ describe('generateRuleProposal', () => {
   });
 
   it('returns null when Haiku times out', async () => {
-    const mockCreate = getMockCreate();
-    mockCreate.mockImplementationOnce(
+    getMockCreate().mockImplementationOnce(
       () => new Promise((resolve) => setTimeout(resolve, 60_000)),
     );
 
@@ -314,10 +355,9 @@ describe('generateRuleProposal', () => {
     expect(result).toBeNull();
   });
 
-  it('returns null on invalid JSON response', async () => {
-    const mockCreate = getMockCreate();
-    mockCreate.mockResolvedValueOnce({
-      content: [{ type: 'text', text: 'not valid json at all' }],
+  it('returns null when response has no tool_use block', async () => {
+    getMockCreate().mockResolvedValueOnce({
+      content: [{ type: 'text', text: 'I cannot help with that.' }],
     });
 
     expect(
@@ -326,18 +366,16 @@ describe('generateRuleProposal', () => {
   });
 
   it('returns null when Haiku throws an error', async () => {
-    const mockCreate = getMockCreate();
-    mockCreate.mockRejectedValueOnce(new Error('API error'));
+    getMockCreate().mockRejectedValueOnce(new Error('API error'));
 
     expect(
       await generateRuleProposal('http', 'https://example.com/'),
     ).toBeNull();
   });
 
-  it('returns null when name exceeds 40 chars in response', async () => {
-    const mockCreate = getMockCreate();
-    mockCreate.mockResolvedValueOnce(
-      makeValidResponse({ name: 'A'.repeat(41) }),
+  it('returns null when tool input has name > 40 chars', async () => {
+    getMockCreate().mockResolvedValueOnce(
+      makeToolUseResponse({ name: 'A'.repeat(41) }),
     );
 
     expect(
@@ -345,28 +383,27 @@ describe('generateRuleProposal', () => {
     ).toBeNull();
   });
 
-  it('returns null for * pattern in response', async () => {
-    const mockCreate = getMockCreate();
-    mockCreate.mockResolvedValueOnce(makeValidResponse({ pattern: '*' }));
+  it('returns null for * pattern in tool input', async () => {
+    getMockCreate().mockResolvedValueOnce(makeToolUseResponse({ patterns: ['*'] }));
 
     expect(
       await generateRuleProposal('http', 'https://example.com/'),
     ).toBeNull();
   });
 
-  it('returns null for bad scope in response', async () => {
-    const mockCreate = getMockCreate();
-    mockCreate.mockResolvedValueOnce(makeValidResponse({ scope: 'everyone' }));
+  it('returns null for bad scope in tool input', async () => {
+    getMockCreate().mockResolvedValueOnce(
+      makeToolUseResponse({ scope: 'everyone' }),
+    );
 
     expect(
       await generateRuleProposal('http', 'https://example.com/'),
     ).toBeNull();
   });
 
-  it('returns null for connect pattern without : in response', async () => {
-    const mockCreate = getMockCreate();
-    mockCreate.mockResolvedValueOnce(
-      makeValidResponse({ pattern: '*.github.com' }),
+  it('returns null for connect pattern without : in tool input', async () => {
+    getMockCreate().mockResolvedValueOnce(
+      makeToolUseResponse({ patterns: ['*.github.com'] }),
     );
 
     expect(
@@ -375,9 +412,8 @@ describe('generateRuleProposal', () => {
   });
 
   it('returns null for mcp pattern not starting with mcp__', async () => {
-    const mockCreate = getMockCreate();
-    mockCreate.mockResolvedValueOnce(
-      makeValidResponse({ pattern: 'nanoclaw__send_message' }),
+    getMockCreate().mockResolvedValueOnce(
+      makeToolUseResponse({ patterns: ['nanoclaw__send_message'] }),
     );
 
     expect(

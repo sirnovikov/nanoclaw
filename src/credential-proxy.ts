@@ -28,7 +28,7 @@ import path from 'node:path';
 import { HttpsProxyAgent } from 'https-proxy-agent';
 
 import { DATA_DIR } from './config.js';
-import { insertPermissionRule } from './db.js';
+import { insertPermissionRule, logPermissionDecision } from './db.js';
 import { readEnvFile } from './env.js';
 import { logger } from './logger.js';
 import {
@@ -146,6 +146,7 @@ const PERMISSION_TIMEOUT_MS = 30 * 60 * 1000; // 30 minutes
 interface PendingPermission {
   resolve: (decision: 'allow' | 'deny') => void;
   egressType: EgressType;
+  subject: string;
   proposal: RuleProposal | null;
   groupFolder: string;
 }
@@ -164,6 +165,7 @@ const pendingPermissions = new Map<string, PendingPermission>();
 export interface PermissionResolverEntry {
   resolve: (decision: 'allow' | 'deny') => void;
   egressType: EgressType;
+  subject: string;
   proposal: RuleProposal | null;
   groupFolder: string;
 }
@@ -240,6 +242,7 @@ export async function checkWithApproval(
         resolve(decision);
       },
       egressType,
+      subject,
       proposal,
       groupFolder,
     });
@@ -325,7 +328,7 @@ export function startCredentialProxy(
           );
           if (!group) {
             logger.warn(
-              { url: req.url },
+              { url: req.url, remoteAddress: req.socket.remoteAddress },
               'Permission check: cannot resolve group, denying HTTP request',
             );
             res.writeHead(403);
@@ -429,7 +432,7 @@ export function startCredentialProxy(
       );
       if (!group) {
         logger.warn(
-          { host: connectHost },
+          { host: connectHost, remoteAddress: clientSocket.remoteAddress },
           'Permission check: cannot resolve group, denying CONNECT',
         );
         clientSocket.write('HTTP/1.1 403 Forbidden\r\n\r\n');
@@ -486,21 +489,41 @@ export function handleProxyPermissionResponse(
   const pending = proxyPending ?? registryEntry;
 
   if (decision === 'always' && pending?.proposal) {
-    insertPermissionRule({
-      id: `rule-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
-      egress_type: pending.egressType,
-      pattern: pending.proposal.pattern,
-      effect: 'allow',
-      scope: pending.proposal.scope,
-      group_folder:
-        pending.proposal.scope === 'group' ? pending.groupFolder : null,
-      description: pending.proposal.description,
-      source: 'telegram',
-      created_at: new Date().toISOString(),
-    });
+    const now = new Date().toISOString();
+    const effect = (pending.proposal.effect === 'deny' ? 'deny' : 'allow') as 'allow' | 'deny';
+    for (const pattern of pending.proposal.patterns) {
+      insertPermissionRule({
+        id: `rule-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+        egress_type: pending.egressType,
+        pattern,
+        effect,
+        scope: pending.proposal.scope,
+        group_folder:
+          pending.proposal.scope === 'group' ? pending.groupFolder : null,
+        description: pending.proposal.description,
+        source: 'telegram',
+        created_at: now,
+      });
+    }
   }
 
-  const resolved: 'allow' | 'deny' = decision !== 'deny' ? 'allow' : 'deny';
+  // "always" resolves based on the proposal's effect
+  let resolved: 'allow' | 'deny';
+  if (decision === 'always' && pending?.proposal) {
+    resolved = pending.proposal.effect === 'deny' ? 'deny' : 'allow';
+  } else {
+    resolved = decision !== 'deny' ? 'allow' : 'deny';
+  }
+
+  // Log decision to audit trail for Haiku context
+  if (pending) {
+    logPermissionDecision({
+      egress_type: pending.egressType,
+      subject: pending.subject,
+      decision,
+      group_folder: pending.groupFolder,
+    });
+  }
 
   if (proxyPending) {
     resolvePermission(requestId, resolved);

@@ -176,7 +176,7 @@ async function runTask(
   try {
     const bridgeDeps: BridgePermissionDeps | undefined =
       deps.sendPermissionRequest
-        ? { sendPermissionRequest: deps.sendPermissionRequest }
+        ? { sendPermissionRequest: deps.sendPermissionRequest, getDecisionHistory: () => [] }
         : undefined;
 
     const output = await runContainerAgent(

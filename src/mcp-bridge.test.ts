@@ -23,6 +23,7 @@ import {
 function makeDeps(overrides?: Partial<McpBridgeDeps>): McpBridgeDeps {
   return {
     sendPermissionRequest: vi.fn().mockResolvedValue(42),
+    getDecisionHistory: vi.fn().mockReturnValue([]),
     groupFolder: 'test-group',
     chatJid: 'tg:123',
     ...overrides,

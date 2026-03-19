@@ -38,6 +38,7 @@ import {
   getAllTasks,
   getMessagesSince,
   getNewMessages,
+  getRecentPermissionDecisions,
   getRouterState,
   initDatabase,
   setRegisteredGroup,
@@ -337,6 +338,8 @@ async function runAgent(
             req.toolInput,
           );
         },
+        getDecisionHistory: () =>
+          getRecentPermissionDecisions(group.folder),
       },
     );
 

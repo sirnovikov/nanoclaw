@@ -320,7 +320,7 @@ export class TelegramChannel implements Channel {
     egressType: string,
     subject: string,
     groupFolder: string,
-    proposal: { name: string; pattern: string; scope: string } | null,
+    proposal: { name: string; patterns: string[]; effect: string; scope: string; description: string } | null,
     toolInput?: unknown,
   ): Promise<number | null> {
     if (!this.bot) return null;
@@ -357,26 +357,43 @@ export class TelegramChannel implements Channel {
       }
     }
 
+    // Build proposal section if Haiku provided one
+    let proposalText = '';
+    if (proposal) {
+      const patternsDisplay = proposal.patterns
+        .map((p) => `<code>${escHtml(p)}</code>`)
+        .join(', ');
+      proposalText =
+        `\n\n<b>When:</b> ${escHtml(proposal.description)}` +
+        `\n<b>Rule:</b> ${patternsDisplay}`;
+    }
+
     const text =
       `🔐 <b>Permission</b>\n\n` +
       `${typeLabel} ${displaySubject}\n` +
       `Group: ${escHtml(groupFolder)}` +
-      toolInputText;
+      toolInputText +
+      proposalText;
 
-    const alwaysButton = proposal
-      ? {
-          text: `✅ Always: ${proposal.name}`,
-          callback_data: `always_${requestId}`,
-        }
-      : null;
-
-    const keyboard = [
-      [
-        { text: '✅ Once', callback_data: `once_${requestId}` },
-        ...(alwaysButton ? [alwaysButton] : []),
-        { text: '❌ Deny', callback_data: `deny_${requestId}` },
-      ],
+    // Row 1: Allow once / Deny once
+    // Row 2: Always allow/deny (if proposal exists)
+    const row1 = [
+      { text: '✅ Allow once', callback_data: `once_${requestId}` },
+      { text: '❌ Deny once', callback_data: `deny_${requestId}` },
     ];
+
+    const keyboard = [row1];
+
+    if (proposal) {
+      const effectEmoji = proposal.effect === 'deny' ? '🚫' : '✅';
+      const effectLabel = proposal.effect === 'deny' ? 'Always deny' : 'Always allow';
+      keyboard.push([
+        {
+          text: `${effectEmoji} ${effectLabel}: ${proposal.name}`,
+          callback_data: `always_${requestId}`,
+        },
+      ]);
+    }
 
     try {
       const numericId = jid.replace(/^tg:/, '');

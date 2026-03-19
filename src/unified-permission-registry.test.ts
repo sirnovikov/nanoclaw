@@ -45,6 +45,7 @@ describe('unified permission response routing', () => {
     registerPermissionResolver('bridge-req-1', {
       resolve: resolved,
       egressType: 'mcp',
+      subject: 'test-subject',
       proposal: null,
       groupFolder: 'test-group',
     });
@@ -60,6 +61,7 @@ describe('unified permission response routing', () => {
     registerPermissionResolver('bridge-req-2', {
       resolve: resolved,
       egressType: 'mcp',
+      subject: 'test-subject',
       proposal: null,
       groupFolder: 'test-group',
     });
@@ -75,9 +77,11 @@ describe('unified permission response routing', () => {
     registerPermissionResolver('bridge-req-3', {
       resolve: resolved,
       egressType: 'mcp',
+      subject: 'test-subject',
       proposal: {
         name: 'Allow Slack search',
-        pattern: 'mcp__slack__search',
+        patterns: ['mcp__slack__search'],
+        effect: 'allow' as const,
         scope: 'global' as const,
         description: 'Allow Slack search tool globally',
       },
@@ -104,9 +108,11 @@ describe('unified permission response routing', () => {
     registerPermissionResolver('bridge-req-4', {
       resolve: resolved,
       egressType: 'mcp',
+      subject: 'test-subject',
       proposal: {
         name: 'Allow Jira create',
-        pattern: 'mcp__jira__create_issue',
+        patterns: ['mcp__jira__create_issue'],
+        effect: 'allow' as const,
         scope: 'group' as const,
         description: 'Allow Jira create in this group',
       },
@@ -126,9 +132,11 @@ describe('unified permission response routing', () => {
     registerPermissionResolver('bridge-req-5', {
       resolve: resolved,
       egressType: 'mcp',
+      subject: 'test-subject',
       proposal: {
         name: 'Allow something',
-        pattern: 'mcp__test__tool',
+        patterns: ['mcp__test__tool'],
+        effect: 'allow' as const,
         scope: 'global' as const,
         description: 'Test',
       },
@@ -146,6 +154,7 @@ describe('unified permission response routing', () => {
     registerPermissionResolver('bridge-req-6', {
       resolve: resolved,
       egressType: 'mcp',
+      subject: 'test-subject',
       proposal: null,
       groupFolder: 'test-group',
     });
