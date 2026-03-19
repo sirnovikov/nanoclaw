@@ -296,31 +296,31 @@ describe('container-runner IP registration', () => {
 
   it('throws when container IP registration fails', async () => {
     // Make exec return null IP (error on every attempt)
-    vi.mocked(exec).mockImplementation(
-      ((
-        cmd: string,
-        optsOrCb?: unknown,
-        cb?: (err: Error | null, stdout: string, stderr: string) => void,
-      ) => {
-        const callback =
-          typeof optsOrCb === 'function'
-            ? (optsOrCb as (
-                err: Error | null,
-                stdout: string,
-                stderr: string,
-              ) => void)
-            : cb;
-        if (callback) {
-          callback(new Error('not found'), '', '');
-        }
-        return new EventEmitter();
-      }) as typeof exec,
-    );
+    vi.mocked(exec).mockImplementation(((
+      _cmd: string,
+      optsOrCb?: unknown,
+      cb?: (err: Error | null, stdout: string, stderr: string) => void,
+    ) => {
+      const callback =
+        typeof optsOrCb === 'function'
+          ? (optsOrCb as (
+              err: Error | null,
+              stdout: string,
+              stderr: string,
+            ) => void)
+          : cb;
+      if (callback) {
+        callback(new Error('not found'), '', '');
+      }
+      return new EventEmitter();
+    }) as typeof exec);
 
     // Capture the promise and prevent unhandled rejection warnings
-    const resultPromise = runContainerAgent(testGroup, testInput, () => {}).catch(
-      (e: unknown) => e,
-    );
+    const resultPromise = runContainerAgent(
+      testGroup,
+      testInput,
+      () => {},
+    ).catch((e: unknown) => e);
     // getContainerNetworkIp retries 5 times with increasing delays (300ms * attempt).
     // Advance timers enough to exhaust all retry delays: 0 + 300 + 600 + 900 + 1200 = 3000ms
     for (let i = 0; i < 10; i++) {
