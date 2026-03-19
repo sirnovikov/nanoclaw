@@ -412,11 +412,21 @@ export async function runContainerAgent(
   // Register container IP — MUST succeed before agent starts
   const containerIp = await getContainerNetworkIp(containerName);
   if (!containerIp) {
-    logger.error({ containerName }, 'Failed to get container IP — agent cannot use network');
-    try { execSync(`docker kill ${containerName}`, { stdio: 'ignore' }); } catch { /* ignore */ }
+    logger.error(
+      { containerName },
+      'Failed to get container IP — agent cannot use network',
+    );
+    try {
+      execSync(`${CONTAINER_RUNTIME_BIN} kill ${containerName}`, { stdio: 'ignore' });
+    } catch {
+      /* ignore */
+    }
     throw new Error(`Container ${containerName} failed to register network IP`);
   }
-  registerContainerGroup(containerIp, { groupFolder: group.folder, chatJid: input.chatJid });
+  registerContainerGroup(containerIp, {
+    groupFolder: group.folder,
+    chatJid: input.chatJid,
+  });
   container.once('close', () => deregisterContainerGroup(containerIp));
 
   // Write input and wait for completion
