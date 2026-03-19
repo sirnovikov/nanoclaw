@@ -27,6 +27,7 @@ interface ContainerInput {
   isMain: boolean;
   isScheduledTask?: boolean;
   assistantName?: string;
+  mcpBridges?: Array<{ name: string; command: string; args: string[] }>;
 }
 
 interface ContainerOutput {
@@ -407,7 +408,8 @@ async function runQuery(
         'TeamCreate', 'TeamDelete', 'SendMessage',
         'TodoWrite', 'ToolSearch', 'Skill',
         'NotebookEdit',
-        'mcp__nanoclaw__*'
+        'mcp__nanoclaw__*',
+        ...(containerInput.mcpBridges ?? []).map(b => `mcp__${b.name}__*`),
       ],
       env: sdkEnv,
       permissionMode: 'bypassPermissions',
@@ -423,6 +425,13 @@ async function runQuery(
             NANOCLAW_IS_MAIN: containerInput.isMain ? '1' : '0',
           },
         },
+        ...(containerInput.mcpBridges ?? []).reduce(
+          (acc, b) => {
+            acc[b.name] = { command: b.command, args: b.args };
+            return acc;
+          },
+          {} as Record<string, { command: string; args: string[] }>,
+        ),
       },
       hooks: {
         PreCompact: [{ hooks: [createPreCompactHook(containerInput.assistantName)] }],

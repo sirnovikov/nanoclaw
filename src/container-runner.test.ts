@@ -33,12 +33,15 @@ vi.mock('fs', () => ({
   default: {
     existsSync: vi.fn(() => false),
     mkdirSync: vi.fn(),
+    mkdtempSync: vi.fn((prefix: string) => `${prefix}XXXXXX`),
     writeFileSync: vi.fn(),
     readFileSync: vi.fn(() => ''),
     readdirSync: vi.fn(() => []),
     statSync: vi.fn(() => ({ isDirectory: () => false })),
     copyFileSync: vi.fn(),
     cpSync: vi.fn(),
+    unlinkSync: vi.fn(),
+    rmSync: vi.fn(),
   },
 }));
 
@@ -106,13 +109,31 @@ vi.mock('./container-group-registry.js', () => ({
   _clearRegistry: vi.fn(),
 }));
 
+// Mock mcp-bridge
+const mockBridgeListen = vi.fn(async () => vi.fn());
+const mockBridge = {
+  handleJsonRpc: vi.fn(),
+  resolvePermission: vi.fn(),
+  listen: mockBridgeListen,
+  toolsList: null,
+};
+vi.mock('./mcp-bridge.js', () => ({
+  createMcpBridge: vi.fn(() => mockBridge),
+}));
+
 import { exec, spawn } from 'node:child_process';
 import fs from 'node:fs';
 import {
   deregisterContainerGroup,
   registerContainerGroup,
 } from './container-group-registry.js';
-import { type ContainerOutput, runContainerAgent } from './container-runner.js';
+import {
+  type ContainerOutput,
+  generateShadowMcpConfig,
+  parseGroupMcpConfig,
+  runContainerAgent,
+} from './container-runner.js';
+import { createMcpBridge } from './mcp-bridge.js';
 import type { RegisteredGroup } from './types.js';
 
 const testGroup: RegisteredGroup = {
@@ -490,5 +511,233 @@ describe('agent-runner source mount', () => {
       String(call[1]).includes('agent-runner-src'),
     );
     expect(runnerCopy).toBeUndefined();
+  });
+});
+
+describe('MCP bridge setup', () => {
+  describe('parseGroupMcpConfig', () => {
+    afterEach(() => {
+      vi.mocked(fs.existsSync).mockReset();
+      vi.mocked(fs.readFileSync).mockReset();
+    });
+
+    it('returns empty config when .mcp.json does not exist', () => {
+      vi.mocked(fs.existsSync).mockReturnValue(false);
+      const result = parseGroupMcpConfig('/fake/group');
+      expect(result.localServers).toEqual({});
+      expect(result.remoteServers).toEqual({});
+    });
+
+    it('identifies remote servers by url field', () => {
+      vi.mocked(fs.existsSync).mockReturnValue(true);
+      vi.mocked(fs.readFileSync).mockReturnValue(
+        JSON.stringify({
+          mcpServers: {
+            'local-tool': { command: 'npx', args: ['some-tool'] },
+            'remote-api': {
+              url: 'https://api.example.com/mcp',
+              headers: { Authorization: 'Bearer tok' },
+            },
+          },
+        }),
+      );
+
+      const result = parseGroupMcpConfig('/fake/group');
+      expect(Object.keys(result.localServers)).toEqual(['local-tool']);
+      expect(result.localServers['local-tool']).toEqual({
+        command: 'npx',
+        args: ['some-tool'],
+      });
+      expect(Object.keys(result.remoteServers)).toEqual(['remote-api']);
+      expect(result.remoteServers['remote-api']).toEqual({
+        url: 'https://api.example.com/mcp',
+        headers: { Authorization: 'Bearer tok' },
+      });
+    });
+
+    it('identifies remote servers by type: http', () => {
+      vi.mocked(fs.existsSync).mockReturnValue(true);
+      vi.mocked(fs.readFileSync).mockReturnValue(
+        JSON.stringify({
+          mcpServers: {
+            'http-server': { type: 'http', url: 'http://localhost:8080/mcp' },
+          },
+        }),
+      );
+
+      const result = parseGroupMcpConfig('/fake/group');
+      expect(Object.keys(result.remoteServers)).toEqual(['http-server']);
+    });
+
+    it('returns empty config when mcpServers key is missing', () => {
+      vi.mocked(fs.existsSync).mockReturnValue(true);
+      vi.mocked(fs.readFileSync).mockReturnValue(
+        JSON.stringify({ other: true }),
+      );
+
+      const result = parseGroupMcpConfig('/fake/group');
+      expect(result.localServers).toEqual({});
+      expect(result.remoteServers).toEqual({});
+    });
+
+    it('returns empty config on malformed JSON', () => {
+      vi.mocked(fs.existsSync).mockReturnValue(true);
+      vi.mocked(fs.readFileSync).mockReturnValue('not json');
+
+      const result = parseGroupMcpConfig('/fake/group');
+      expect(result.localServers).toEqual({});
+      expect(result.remoteServers).toEqual({});
+    });
+  });
+
+  describe('generateShadowMcpConfig', () => {
+    it('returns null when no local servers', () => {
+      expect(generateShadowMcpConfig({})).toBeNull();
+    });
+
+    it('writes shadow config with only local servers', () => {
+      const localServers = {
+        'my-tool': { command: 'npx', args: ['tool-server'] },
+      };
+      const result = generateShadowMcpConfig(localServers);
+      expect(result).not.toBeNull();
+
+      // Verify writeFileSync was called with the correct content
+      const writeCalls = vi.mocked(fs.writeFileSync).mock.calls;
+      const shadowCall = writeCalls.find(
+        (call) =>
+          typeof call[0] === 'string' &&
+          (call[0] as string).includes('nanoclaw-mcp-'),
+      );
+      expect(shadowCall).toBeDefined();
+      const written = JSON.parse(shadowCall?.[1] as string);
+      expect(written).toEqual({ mcpServers: localServers });
+    });
+  });
+
+  describe('bridge wiring in runContainerAgent', () => {
+    beforeEach(() => {
+      vi.useFakeTimers();
+      fakeProc = createFakeProcess();
+      vi.mocked(createMcpBridge).mockClear();
+      mockBridgeListen.mockClear();
+      vi.mocked(fs.existsSync).mockReturnValue(false);
+      vi.mocked(fs.readFileSync).mockReturnValue('');
+    });
+
+    afterEach(() => {
+      vi.useRealTimers();
+      vi.mocked(fs.existsSync).mockReset();
+      vi.mocked(fs.readFileSync).mockReset();
+    });
+
+    it('skips bridge setup when bridgeDeps is not provided', async () => {
+      const resultPromise = runContainerAgent(testGroup, testInput, () => {});
+      await vi.advanceTimersByTimeAsync(10);
+      emitOutputMarker(fakeProc, {
+        status: 'success',
+        result: 'ok',
+        newSessionId: 's1',
+      });
+      await vi.advanceTimersByTimeAsync(10);
+      fakeProc.emit('close', 0);
+      await vi.advanceTimersByTimeAsync(10);
+      await resultPromise;
+
+      expect(createMcpBridge).not.toHaveBeenCalled();
+    });
+
+    it('skips bridge setup when .mcp.json has no remote servers', async () => {
+      vi.mocked(fs.existsSync).mockImplementation((p) => {
+        if (typeof p === 'string' && p.endsWith('.mcp.json')) return true;
+        return false;
+      });
+      vi.mocked(fs.readFileSync).mockReturnValue(
+        JSON.stringify({
+          mcpServers: { local: { command: 'npx', args: ['x'] } },
+        }),
+      );
+
+      const bridgeDeps = { sendPermissionRequest: vi.fn() };
+      const resultPromise = runContainerAgent(
+        testGroup,
+        testInput,
+        () => {},
+        undefined,
+        bridgeDeps,
+      );
+      await vi.advanceTimersByTimeAsync(10);
+      emitOutputMarker(fakeProc, {
+        status: 'success',
+        result: 'ok',
+        newSessionId: 's1',
+      });
+      await vi.advanceTimersByTimeAsync(10);
+      fakeProc.emit('close', 0);
+      await vi.advanceTimersByTimeAsync(10);
+      await resultPromise;
+
+      expect(createMcpBridge).not.toHaveBeenCalled();
+    });
+
+    it('passes bridge configs through container input when remote servers exist', async () => {
+      vi.mocked(fs.existsSync).mockImplementation((p) => {
+        if (typeof p === 'string' && p.endsWith('.mcp.json')) return true;
+        return false;
+      });
+      vi.mocked(fs.readFileSync).mockReturnValue(
+        JSON.stringify({
+          mcpServers: {
+            'remote-svc': { url: 'https://mcp.example.com' },
+          },
+        }),
+      );
+
+      const bridgeDeps = { sendPermissionRequest: vi.fn() };
+      const resultPromise = runContainerAgent(
+        testGroup,
+        testInput,
+        () => {},
+        undefined,
+        bridgeDeps,
+      );
+      await vi.advanceTimersByTimeAsync(10);
+      emitOutputMarker(fakeProc, {
+        status: 'success',
+        result: 'ok',
+        newSessionId: 's1',
+      });
+      await vi.advanceTimersByTimeAsync(10);
+      fakeProc.emit('close', 0);
+      await vi.advanceTimersByTimeAsync(10);
+      await resultPromise;
+
+      // Bridge was created
+      expect(createMcpBridge).toHaveBeenCalledWith(
+        expect.objectContaining({
+          name: 'remote-svc',
+          url: 'https://mcp.example.com',
+        }),
+        expect.objectContaining({ groupFolder: testGroup.folder }),
+      );
+      expect(mockBridgeListen).toHaveBeenCalled();
+
+      // Verify stdin received mcpBridges
+      const stdinChunks: string[] = [];
+      fakeProc.stdin.on('data', (d: Buffer) => stdinChunks.push(d.toString()));
+      // stdin was already written and ended; read what was captured
+      const _stdinData = vi.mocked(spawn).mock.results[0]?.value?.stdin;
+      // Check the actual write call on the fake proc stdin
+      // The spawn mock returns fakeProc, so stdin.write was called on fakeProc.stdin
+      // PassThrough stores it — read it back
+      const written = fakeProc.stdin.read();
+      if (written) {
+        const parsed = JSON.parse(written.toString());
+        expect(parsed.mcpBridges).toBeDefined();
+        expect(parsed.mcpBridges).toHaveLength(1);
+        expect(parsed.mcpBridges[0].name).toBe('remote-svc');
+        expect(parsed.mcpBridges[0].args).toContain('/bridge/remote-svc.sock');
+      }
+    });
   });
 });

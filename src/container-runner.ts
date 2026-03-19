@@ -4,6 +4,7 @@
  */
 import { type ChildProcess, exec, execSync, spawn } from 'node:child_process';
 import fs from 'node:fs';
+import os from 'node:os';
 import path from 'node:path';
 
 import {
@@ -27,9 +28,11 @@ import {
   readonlyMountArgs,
   stopContainer,
 } from './container-runtime.js';
+import type { PermissionRequest } from './credential-proxy.js';
 import { detectAuthMode } from './credential-proxy.js';
 import { resolveGroupFolderPath, resolveGroupIpcPath } from './group-folder.js';
 import { logger } from './logger.js';
+import { createMcpBridge } from './mcp-bridge.js';
 import { validateAdditionalMounts } from './mount-security.js';
 import type { RegisteredGroup } from './types.js';
 
@@ -45,6 +48,7 @@ export interface ContainerInput {
   isMain: boolean;
   isScheduledTask?: boolean;
   assistantName?: string;
+  mcpBridges?: Array<{ name: string; command: string; args: string[] }>;
 }
 
 export interface ContainerOutput {
@@ -52,6 +56,71 @@ export interface ContainerOutput {
   result: string | null;
   newSessionId?: string;
   error?: string;
+}
+
+export interface BridgePermissionDeps {
+  sendPermissionRequest: (req: PermissionRequest) => Promise<number | null>;
+}
+
+interface McpServerConfig {
+  command?: string;
+  args?: string[];
+  url?: string;
+  type?: string;
+  headers?: Record<string, string>;
+}
+
+interface McpConfig {
+  mcpServers?: Record<string, McpServerConfig>;
+}
+
+export interface ParsedMcpConfig {
+  localServers: Record<string, McpServerConfig>;
+  remoteServers: Record<
+    string,
+    { url: string; headers?: Record<string, string> }
+  >;
+}
+
+export function parseGroupMcpConfig(groupDir: string): ParsedMcpConfig {
+  const mcpJsonPath = path.join(groupDir, '.mcp.json');
+  const result: ParsedMcpConfig = { localServers: {}, remoteServers: {} };
+
+  try {
+    if (!fs.existsSync(mcpJsonPath)) return result;
+    const config = JSON.parse(
+      fs.readFileSync(mcpJsonPath, 'utf-8'),
+    ) as McpConfig;
+    if (!config.mcpServers) return result;
+
+    for (const [name, server] of Object.entries(config.mcpServers)) {
+      if (server.url || server.type === 'http') {
+        result.remoteServers[name] = {
+          url: server.url ?? '',
+          headers: server.headers,
+        };
+      } else {
+        result.localServers[name] = server;
+      }
+    }
+  } catch (err) {
+    logger.warn({ groupDir, err }, 'Failed to parse .mcp.json');
+  }
+
+  return result;
+}
+
+export function generateShadowMcpConfig(
+  localServers: Record<string, McpServerConfig>,
+): string | null {
+  if (Object.keys(localServers).length === 0) return null;
+  const shadow = { mcpServers: localServers };
+  const tmpPath = path.join(
+    os.tmpdir(),
+    `nanoclaw-mcp-${Date.now()}-${Math.random().toString(36).slice(2, 6)}.json`,
+  );
+  fs.writeFileSync(tmpPath, JSON.stringify(shadow, null, 2));
+  return tmpPath;
 }
 
 interface VolumeMount {
@@ -366,6 +435,7 @@ export async function runContainerAgent(
   input: ContainerInput,
   onProcess: (proc: ChildProcess, containerName: string) => void,
   onOutput?: (output: ContainerOutput) => Promise<void>,
+  bridgeDeps?: BridgePermissionDeps,
 ): Promise<ContainerOutput> {
   const startTime = Date.now();
 
@@ -373,6 +443,73 @@ export async function runContainerAgent(
   fs.mkdirSync(groupDir, { recursive: true });
 
   const mounts = buildVolumeMounts(group, input.isMain);
+
+  // MCP bridge setup: parse group's .mcp.json and spawn bridges for remote servers
+  const bridgeCleanups: Array<() => void> = [];
+  let bridgeSocketDir: string | null = null;
+  let shadowMcpPath: string | null = null;
+  let inputWithBridges = input;
+
+  if (bridgeDeps) {
+    const mcpConfig = parseGroupMcpConfig(groupDir);
+    const remoteNames = Object.keys(mcpConfig.remoteServers);
+
+    if (remoteNames.length > 0) {
+      // Create temp directory for bridge sockets
+      bridgeSocketDir = fs.mkdtempSync(
+        path.join(os.tmpdir(), 'nanoclaw-bridge-'),
+      );
+
+      for (const name of remoteNames) {
+        const remote = mcpConfig.remoteServers[name];
+        if (!remote) continue;
+        const bridge = createMcpBridge(
+          { name, url: remote.url, headers: remote.headers },
+          {
+            sendPermissionRequest: bridgeDeps.sendPermissionRequest,
+            groupFolder: group.folder,
+            chatJid: input.chatJid,
+          },
+        );
+        const socketPath = path.join(bridgeSocketDir, `${name}.sock`);
+        const cleanup = await bridge.listen(socketPath);
+        bridgeCleanups.push(cleanup);
+      }
+
+      // Mount bridge socket dir into container
+      mounts.push({
+        hostPath: bridgeSocketDir,
+        containerPath: '/bridge',
+        readonly: false,
+      });
+
+      // Generate shadow .mcp.json with only local servers
+      shadowMcpPath = generateShadowMcpConfig(mcpConfig.localServers);
+      if (shadowMcpPath) {
+        mounts.push({
+          hostPath: shadowMcpPath,
+          containerPath: '/workspace/group/.mcp.json',
+          readonly: true,
+        });
+      }
+
+      // Pass bridge configs in container input
+      inputWithBridges = {
+        ...input,
+        mcpBridges: remoteNames.map((name) => ({
+          name,
+          command: 'node',
+          args: ['/tmp/dist/bridge-client.js', `/bridge/${name}.sock`],
+        })),
+      };
+
+      logger.info(
+        { group: group.name, bridges: remoteNames },
+        'MCP bridges spawned for remote servers',
+      );
+    }
+  }
+
   const safeName = group.folder.replace(/[^a-zA-Z0-9-]/g, '-');
   const containerName = `nanoclaw-${safeName}-${Date.now()}`;
   const containerArgs = buildContainerArgs(mounts, containerName);
@@ -403,6 +540,31 @@ export async function runContainerAgent(
   const logsDir = path.join(groupDir, 'logs');
   fs.mkdirSync(logsDir, { recursive: true });
 
+  /** Clean up bridge sockets, listeners, and shadow config. */
+  const cleanupBridges = () => {
+    for (const cleanup of bridgeCleanups) {
+      try {
+        cleanup();
+      } catch {
+        /* ignore */
+      }
+    }
+    if (shadowMcpPath) {
+      try {
+        fs.unlinkSync(shadowMcpPath);
+      } catch {
+        /* ignore */
+      }
+    }
+    if (bridgeSocketDir) {
+      try {
+        fs.rmSync(bridgeSocketDir, { recursive: true, force: true });
+      } catch {
+        /* ignore */
+      }
+    }
+  };
+
   const container = spawn(CONTAINER_RUNTIME_BIN, containerArgs, {
     stdio: ['pipe', 'pipe', 'pipe'],
   });
@@ -416,8 +578,11 @@ export async function runContainerAgent(
       { containerName },
       'Failed to get container IP — agent cannot use network',
     );
+    cleanupBridges();
     try {
-      execSync(`${CONTAINER_RUNTIME_BIN} kill ${containerName}`, { stdio: 'ignore' });
+      execSync(`${CONTAINER_RUNTIME_BIN} kill ${containerName}`, {
+        stdio: 'ignore',
+      });
     } catch {
       /* ignore */
     }
@@ -427,10 +592,13 @@ export async function runContainerAgent(
     groupFolder: group.folder,
     chatJid: input.chatJid,
   });
-  container.once('close', () => deregisterContainerGroup(containerIp));
+  container.once('close', () => {
+    deregisterContainerGroup(containerIp);
+    cleanupBridges();
+  });
 
   // Write input and wait for completion
-  container.stdin.write(JSON.stringify(input));
+  container.stdin.write(JSON.stringify(inputWithBridges));
   container.stdin.end();
 
   return new Promise((resolve) => {
