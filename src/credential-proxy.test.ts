@@ -96,7 +96,11 @@ describe.skipIf(!canListen)('credential-proxy', () => {
     Object.assign(mockEnv, env, {
       ANTHROPIC_BASE_URL: `http://127.0.0.1:${upstreamPort}`,
     });
-    proxyServer = await startCredentialProxy(0, '127.0.0.1', mockApprovalCallbacks);
+    proxyServer = await startCredentialProxy(
+      0,
+      '127.0.0.1',
+      mockApprovalCallbacks,
+    );
     return (proxyServer.address() as AddressInfo).port;
   }
 
@@ -193,7 +197,11 @@ describe.skipIf(!canListen)('credential-proxy', () => {
       ANTHROPIC_API_KEY: 'sk-ant-real-key',
       ANTHROPIC_BASE_URL: 'http://127.0.0.1:59999',
     });
-    proxyServer = await startCredentialProxy(0, '127.0.0.1', mockApprovalCallbacks);
+    proxyServer = await startCredentialProxy(
+      0,
+      '127.0.0.1',
+      mockApprovalCallbacks,
+    );
     proxyPort = (proxyServer.address() as AddressInfo).port;
 
     const res = await makeRequest(

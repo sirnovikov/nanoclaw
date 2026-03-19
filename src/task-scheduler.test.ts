@@ -366,8 +366,16 @@ describe('task scheduler', () => {
     vi.mocked(runContainerAgent).mockImplementationOnce(
       // biome-ignore lint/suspicious/noExplicitAny: test mock captures streaming callback
       async (_g: any, _o: any, _p: any, onOutput: any) => {
-        await onOutput({ status: 'error', result: null, error: 'container crashed' });
-        return { status: 'error' as const, result: null, error: 'container crashed' };
+        await onOutput({
+          status: 'error',
+          result: null,
+          error: 'container crashed',
+        });
+        return {
+          status: 'error' as const,
+          result: null,
+          error: 'container crashed',
+        };
       },
     );
 
@@ -415,7 +423,9 @@ describe('task scheduler', () => {
 
   it('runTask captures thrown exception and sets last_result to error summary', async () => {
     const { runContainerAgent } = await import('./container-runner.js');
-    vi.mocked(runContainerAgent).mockRejectedValueOnce(new Error('network timeout'));
+    vi.mocked(runContainerAgent).mockRejectedValueOnce(
+      new Error('network timeout'),
+    );
 
     createTask({
       id: 'task-throw',

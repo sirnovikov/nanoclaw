@@ -330,7 +330,10 @@ export class TelegramChannel implements Channel {
 
     let toolInputText = '';
     if (toolInput != null) {
-      const raw = typeof toolInput === 'string' ? toolInput : JSON.stringify(toolInput, null, 2);
+      const raw =
+        typeof toolInput === 'string'
+          ? toolInput
+          : JSON.stringify(toolInput, null, 2);
       // Truncate to avoid Telegram message length limits
       const truncated = raw.length > 500 ? `${raw.slice(0, 497)}...` : raw;
       toolInputText = `\nInput: \`${truncated}\``;

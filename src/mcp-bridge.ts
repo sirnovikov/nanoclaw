@@ -128,7 +128,8 @@ export function createMcpBridge(
     // Register in the unified resolver registry so Telegram callback
     // routing can find this bridge's resolver alongside proxy resolvers.
     registerPermissionResolver(requestId, {
-      resolve: (decision) => resolvePermission(requestId, decision === 'allow' ? 'allow' : 'deny'),
+      resolve: (decision) =>
+        resolvePermission(requestId, decision === 'allow' ? 'allow' : 'deny'),
       egressType: 'mcp',
       proposal,
       groupFolder: deps.groupFolder,

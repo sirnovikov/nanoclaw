@@ -110,4 +110,3 @@ describe('startIpcWatcher — message forwarding', () => {
     expect(deps.sendMessage).toHaveBeenCalledWith('other@g.us', 'broadcast');
   });
 });
-

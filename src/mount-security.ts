@@ -408,4 +408,3 @@ export function generateAllowlistTemplate(): string {
 
   return JSON.stringify(template, null, 2);
 }
-

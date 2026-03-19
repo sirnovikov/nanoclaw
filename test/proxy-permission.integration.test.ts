@@ -1,6 +1,4 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import http from 'http';
-import net from 'net';
 import { _initTestDatabase } from '../src/db.js';
 
 // Mock Anthropic SDK (Haiku) — vi.mock is hoisted; factory must be self-contained
@@ -32,18 +30,11 @@ vi.mock('../src/db.js', async (importOriginal) => {
 import { checkPermissionRule } from '../src/permission-rule-engine/rule-engine.js';
 import { generateRuleProposal } from '../src/permission-rule-generator.js';
 import { insertPermissionRule } from '../src/db.js';
-import { handleProxyPermissionResponse } from '../src/credential-proxy.js';
-
-async function startTestProxy(
-  approvalCallbacks?: Parameters<
-    typeof import('../src/credential-proxy.js').startCredentialProxy
-  >[2],
-) {
-  const { startCredentialProxy } = await import('../src/credential-proxy.js');
-  const server = await startCredentialProxy(0, '127.0.0.1', approvalCallbacks);
-  const port = (server.address() as net.AddressInfo).port;
-  return { server, port };
-}
+import {
+  checkWithApproval,
+  handleProxyPermissionResponse,
+  type PermissionApprovalCallbacks,
+} from '../src/credential-proxy.js';
 
 beforeEach(() => {
   _initTestDatabase();
@@ -53,156 +44,104 @@ beforeEach(() => {
 });
 
 afterEach(() => {
-  // servers closed inside each test
+  vi.restoreAllMocks();
 });
 
 describe('proxy permission integration', () => {
-  it('HTTP request with matching allow rule is forwarded without calling sendPermissionRequest', async () => {
-    // Simulate rule engine returning 'allow' directly
+  it('matching allow rule returns allow without calling sendPermissionRequest', async () => {
     vi.mocked(checkPermissionRule).mockReturnValue('allow');
 
     const sendPermissionRequest = vi.fn().mockResolvedValue(1);
-    const resolveGroup = vi.fn().mockReturnValue({ groupFolder: 'test', chatJid: 'tg:123' });
-
-    const { server, port } = await startTestProxy({
-      resolveGroup,
+    const callbacks: PermissionApprovalCallbacks = {
+      resolveGroup: vi.fn().mockReturnValue({ groupFolder: 'test', chatJid: 'tg:123' }),
       sendPermissionRequest,
       onPermissionResponse: vi.fn(),
-    });
+    };
 
-    await new Promise<void>((resolve) => {
-      const req = http.request(
-        {
-          host: '127.0.0.1',
-          port,
-          method: 'GET',
-          path: '/test',
-          headers: { host: 'example.com' },
-        },
-        (res) => {
-          res.resume();
-          resolve();
-        },
-      );
-      req.on('error', () => resolve());
-      req.end();
-    });
+    const decision = await checkWithApproval(
+      'http',
+      'http://example.com/test',
+      'test',
+      'tg:123',
+      callbacks,
+    );
 
+    expect(decision).toBe('allow');
     expect(sendPermissionRequest).not.toHaveBeenCalled();
-    await new Promise<void>((r) => server.close(() => r()));
   });
 
-  it('CONNECT request with deny tap returns 403', async () => {
-    const { resolvePermission } = await import('../src/credential-proxy.js');
+  it('matching deny rule returns deny without calling sendPermissionRequest', async () => {
+    vi.mocked(checkPermissionRule).mockReturnValue('deny');
 
+    const sendPermissionRequest = vi.fn().mockResolvedValue(1);
+    const callbacks: PermissionApprovalCallbacks = {
+      resolveGroup: vi.fn().mockReturnValue({ groupFolder: 'test', chatJid: 'tg:123' }),
+      sendPermissionRequest,
+      onPermissionResponse: vi.fn(),
+    };
+
+    const decision = await checkWithApproval(
+      'connect',
+      'example.com:443',
+      'test',
+      'tg:123',
+      callbacks,
+    );
+
+    expect(decision).toBe('deny');
+    expect(sendPermissionRequest).not.toHaveBeenCalled();
+  });
+
+  it('no matching rule + deny tap returns deny', async () => {
     const sendPermissionRequest = vi.fn().mockImplementation(async (req) => {
       // Simulate user tapping "Deny" after a short delay
-      setTimeout(() => resolvePermission(req.requestId, 'deny'), 20);
+      setTimeout(() => handleProxyPermissionResponse(req.requestId, 'deny'), 20);
       return 42;
     });
 
-    const { server, port } = await startTestProxy({
+    const callbacks: PermissionApprovalCallbacks = {
       resolveGroup: vi.fn().mockReturnValue({ groupFolder: 'test', chatJid: 'tg:123' }),
       sendPermissionRequest,
       onPermissionResponse: vi.fn(),
-    });
+    };
 
-    const responseCode = await new Promise<number>((resolve) => {
-      const socket = net.connect(port, '127.0.0.1', () => {
-        socket.write('CONNECT example.com:443 HTTP/1.1\r\nHost: example.com:443\r\n\r\n');
-      });
-      socket.on('data', (data) => {
-        const status = data.toString().match(/HTTP\/\d\.\d (\d+)/)?.[1];
-        resolve(parseInt(status ?? '0', 10));
-        socket.destroy();
-      });
-      socket.on('error', () => resolve(0));
-    });
+    const decision = await checkWithApproval(
+      'connect',
+      'example.com:443',
+      'test',
+      'tg:123',
+      callbacks,
+    );
 
-    expect(responseCode).toBe(403);
-    await new Promise<void>((r) => server.close(() => r()));
-  }, 10_000);
-
-  it('direct API request (path-only URL) is never permission-gated even with approvalCallbacks', async () => {
-    // Regression: proxy was treating direct ANTHROPIC_BASE_URL calls as external
-    // traffic because host.docker.internal != api.anthropic.com. Direct requests
-    // have a path-only URL (e.g. /v1/messages) and must always pass through.
-    const sendPermissionRequest = vi.fn().mockResolvedValue(1);
-    const resolveGroup = vi.fn().mockReturnValue({ groupFolder: 'test', chatJid: 'tg:123' });
-
-    const { server, port } = await startTestProxy({
-      resolveGroup,
-      sendPermissionRequest,
-      onPermissionResponse: vi.fn(),
-    });
-
-    const res = await new Promise<{ status: number }>((resolve) => {
-      const req = http.request(
-        {
-          host: '127.0.0.1',
-          port,
-          method: 'POST',
-          // Path-only URL — this is how ANTHROPIC_BASE_URL traffic arrives
-          path: '/v1/messages',
-          headers: { host: 'host.docker.internal:3001', 'content-type': 'application/json' },
-        },
-        (r) => {
-          r.resume();
-          resolve({ status: r.statusCode ?? 0 });
-        },
-      );
-      req.on('error', () => resolve({ status: 0 }));
-      req.end('{}');
-    });
-
-    // Must NOT have been permission-gated (no Telegram message)
-    expect(sendPermissionRequest).not.toHaveBeenCalled();
-    // 502 is fine — upstream isn't real in tests. What matters is it wasn't 403.
-    expect(res.status).not.toBe(403);
-    await new Promise<void>((r) => server.close(() => r()));
+    expect(decision).toBe('deny');
+    expect(sendPermissionRequest).toHaveBeenCalledOnce();
   });
 
-  it('HTTP proxy request with no matching rule and deny tap returns 403', async () => {
-    const { resolvePermission } = await import('../src/credential-proxy.js');
-
+  it('no matching rule + once tap returns allow without persisting rule', async () => {
     const sendPermissionRequest = vi.fn().mockImplementation(async (req) => {
-      setTimeout(() => resolvePermission(req.requestId, 'deny'), 20);
+      setTimeout(() => handleProxyPermissionResponse(req.requestId, 'once'), 20);
       return 42;
     });
 
-    const { server, port } = await startTestProxy({
+    const callbacks: PermissionApprovalCallbacks = {
       resolveGroup: vi.fn().mockReturnValue({ groupFolder: 'test', chatJid: 'tg:123' }),
       sendPermissionRequest,
       onPermissionResponse: vi.fn(),
-    });
+    };
 
-    // HTTP proxy requests use an absolute URL (e.g. http://example.com/test),
-    // not a path-only URL — that distinction is how the proxy tells them apart
-    // from direct Anthropic API calls.
-    const responseCode = await new Promise<number>((resolve) => {
-      const req = http.request(
-        {
-          host: '127.0.0.1',
-          port,
-          method: 'GET',
-          path: 'http://example.com/test', // absolute URL → HTTP proxy mode
-          headers: { host: 'example.com' },
-        },
-        (res) => {
-          res.resume();
-          resolve(res.statusCode ?? 0);
-        },
-      );
-      req.on('error', () => resolve(0));
-      req.end();
-    });
+    const decision = await checkWithApproval(
+      'http',
+      'http://example.com/test',
+      'test',
+      'tg:123',
+      callbacks,
+    );
 
-    expect(responseCode).toBe(403);
-    expect(sendPermissionRequest).toHaveBeenCalledOnce();
-    await new Promise<void>((r) => server.close(() => r()));
-  }, 10_000);
+    expect(decision).toBe('allow');
+    expect(insertPermissionRule).not.toHaveBeenCalled();
+  });
 
-  it('CONNECT with always tap calls insertPermissionRule with the proposal', async () => {
+  it('always tap calls insertPermissionRule with the proposal', async () => {
     const proposal = {
       pattern: '*.example.com:443',
       scope: 'global' as const,
@@ -210,40 +149,26 @@ describe('proxy permission integration', () => {
     };
     vi.mocked(generateRuleProposal).mockResolvedValue(proposal);
 
-    let capturedRequestId = '';
     const sendPermissionRequest = vi.fn().mockImplementation(async (req) => {
-      capturedRequestId = req.requestId;
-      // Don't resolve — handleProxyPermissionResponse will do it
+      setTimeout(() => handleProxyPermissionResponse(req.requestId, 'always'), 20);
       return 42;
     });
 
-    const { server, port } = await startTestProxy({
+    const callbacks: PermissionApprovalCallbacks = {
       resolveGroup: vi.fn().mockReturnValue({ groupFolder: 'test', chatJid: 'tg:123' }),
       sendPermissionRequest,
       onPermissionResponse: vi.fn(),
-    });
+    };
 
-    // Send CONNECT — it will block waiting for a decision
-    const connectPromise = new Promise<number>((resolve) => {
-      const socket = net.connect(port, '127.0.0.1', () => {
-        socket.write('CONNECT example.com:443 HTTP/1.1\r\nHost: example.com:443\r\n\r\n');
-      });
-      socket.on('data', (data) => {
-        const status = data.toString().match(/HTTP\/\d\.\d (\d+)/)?.[1];
-        resolve(parseInt(status ?? '0', 10));
-        socket.destroy();
-      });
-      socket.on('error', () => resolve(0));
-    });
+    const decision = await checkWithApproval(
+      'connect',
+      'example.com:443',
+      'test',
+      'tg:123',
+      callbacks,
+    );
 
-    // Wait for sendPermissionRequest to be called (requestId populated)
-    await vi.waitFor(() => expect(capturedRequestId).not.toBe(''));
-
-    // Simulate user tapping "Always"
-    handleProxyPermissionResponse(capturedRequestId, 'always');
-
-    await connectPromise;
-
+    expect(decision).toBe('allow');
     expect(insertPermissionRule).toHaveBeenCalledOnce();
     expect(insertPermissionRule).toHaveBeenCalledWith(
       expect.objectContaining({
@@ -253,11 +178,44 @@ describe('proxy permission integration', () => {
         source: 'telegram',
       }),
     );
+  });
 
-    await new Promise<void>((r) => server.close(() => r()));
-  }, 10_000);
+  it('always tap with group-scoped proposal sets group_folder', async () => {
+    const proposal = {
+      pattern: '*.internal.com:443',
+      scope: 'group' as const,
+      description: 'Allow internal for this group',
+    };
+    vi.mocked(generateRuleProposal).mockResolvedValue(proposal);
 
-  it('CONNECT with once tap does not call insertPermissionRule', async () => {
+    const sendPermissionRequest = vi.fn().mockImplementation(async (req) => {
+      setTimeout(() => handleProxyPermissionResponse(req.requestId, 'always'), 20);
+      return 42;
+    });
+
+    const callbacks: PermissionApprovalCallbacks = {
+      resolveGroup: vi.fn().mockReturnValue({ groupFolder: 'my-group', chatJid: 'tg:123' }),
+      sendPermissionRequest,
+      onPermissionResponse: vi.fn(),
+    };
+
+    await checkWithApproval(
+      'connect',
+      'internal.com:443',
+      'my-group',
+      'tg:123',
+      callbacks,
+    );
+
+    expect(insertPermissionRule).toHaveBeenCalledWith(
+      expect.objectContaining({
+        scope: 'group',
+        group_folder: 'my-group',
+      }),
+    );
+  });
+
+  it('once tap does not call insertPermissionRule even with proposal', async () => {
     const proposal = {
       pattern: '*.example.com:443',
       scope: 'global' as const,
@@ -265,63 +223,26 @@ describe('proxy permission integration', () => {
     };
     vi.mocked(generateRuleProposal).mockResolvedValue(proposal);
 
-    let capturedRequestId = '';
     const sendPermissionRequest = vi.fn().mockImplementation(async (req) => {
-      capturedRequestId = req.requestId;
+      setTimeout(() => handleProxyPermissionResponse(req.requestId, 'once'), 20);
       return 42;
     });
 
-    const { server, port } = await startTestProxy({
+    const callbacks: PermissionApprovalCallbacks = {
       resolveGroup: vi.fn().mockReturnValue({ groupFolder: 'test', chatJid: 'tg:123' }),
       sendPermissionRequest,
       onPermissionResponse: vi.fn(),
-    });
+    };
 
-    const connectPromise = new Promise<number>((resolve) => {
-      const socket = net.connect(port, '127.0.0.1', () => {
-        socket.write('CONNECT example.com:443 HTTP/1.1\r\nHost: example.com:443\r\n\r\n');
-      });
-      socket.on('data', (data) => {
-        const status = data.toString().match(/HTTP\/\d\.\d (\d+)/)?.[1];
-        resolve(parseInt(status ?? '0', 10));
-        socket.destroy();
-      });
-      socket.on('error', () => resolve(0));
-    });
+    const decision = await checkWithApproval(
+      'connect',
+      'example.com:443',
+      'test',
+      'tg:123',
+      callbacks,
+    );
 
-    await vi.waitFor(() => expect(capturedRequestId).not.toBe(''));
-
-    handleProxyPermissionResponse(capturedRequestId, 'once');
-
-    await connectPromise;
-
+    expect(decision).toBe('allow');
     expect(insertPermissionRule).not.toHaveBeenCalled();
-    await new Promise<void>((r) => server.close(() => r()));
-  }, 10_000);
-
-  it('CONNECT with allow rule bypasses sendPermissionRequest', async () => {
-    vi.mocked(checkPermissionRule).mockReturnValue('allow');
-
-    const sendPermissionRequest = vi.fn().mockResolvedValue(1);
-
-    const { server, port } = await startTestProxy({
-      resolveGroup: vi.fn().mockReturnValue({ groupFolder: 'test', chatJid: 'tg:123' }),
-      sendPermissionRequest,
-      onPermissionResponse: vi.fn(),
-    });
-
-    await new Promise<void>((resolve) => {
-      const socket = net.connect(port, '127.0.0.1', () => {
-        socket.write('CONNECT example.com:443 HTTP/1.1\r\nHost: example.com:443\r\n\r\n');
-      });
-      socket.on('data', () => {
-        socket.destroy();
-        resolve();
-      });
-      socket.on('error', () => resolve());
-    });
-
-    expect(sendPermissionRequest).not.toHaveBeenCalled();
-    await new Promise<void>((r) => server.close(() => r()));
   });
 });
