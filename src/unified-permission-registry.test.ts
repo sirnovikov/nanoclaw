@@ -23,7 +23,6 @@ import {
   _getRegistrySize,
   handleProxyPermissionResponse,
   registerPermissionResolver,
-  resolvePermission,
 } from './credential-proxy.js';
 import { insertPermissionRule } from './db.js';
 
@@ -35,7 +34,9 @@ beforeEach(() => {
 describe('unified permission response routing', () => {
   it('routes response to proxy resolver (existing behaviour)', () => {
     // handleProxyPermissionResponse with an unknown ID does not throw
-    expect(() => handleProxyPermissionResponse('unknown-id', 'once')).not.toThrow();
+    expect(() =>
+      handleProxyPermissionResponse('unknown-id', 'once'),
+    ).not.toThrow();
     expect(insertPermissionRule).not.toHaveBeenCalled();
   });
 
