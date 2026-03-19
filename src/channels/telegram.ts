@@ -320,7 +320,13 @@ export class TelegramChannel implements Channel {
     egressType: string,
     subject: string,
     groupFolder: string,
-    proposal: { name: string; patterns: string[]; effect: string; scope: string; description: string } | null,
+    proposal: {
+      name: string;
+      patterns: string[];
+      effect: string;
+      scope: string;
+      description: string;
+    } | null,
     toolInput?: unknown,
   ): Promise<number | null> {
     if (!this.bot) return null;
@@ -357,23 +363,11 @@ export class TelegramChannel implements Channel {
       }
     }
 
-    // Build proposal section if Haiku provided one
-    let proposalText = '';
-    if (proposal) {
-      const patternsDisplay = proposal.patterns
-        .map((p) => `<code>${escHtml(p)}</code>`)
-        .join(', ');
-      proposalText =
-        `\n\n<b>When:</b> ${escHtml(proposal.description)}` +
-        `\n<b>Rule:</b> ${patternsDisplay}`;
-    }
-
     const text =
       `🔐 <b>Permission</b>\n\n` +
       `${typeLabel} ${displaySubject}\n` +
       `Group: ${escHtml(groupFolder)}` +
-      toolInputText +
-      proposalText;
+      toolInputText;
 
     // Row 1: Allow once / Deny once
     // Row 2: Always allow/deny (if proposal exists)
@@ -386,10 +380,12 @@ export class TelegramChannel implements Channel {
 
     if (proposal) {
       const effectEmoji = proposal.effect === 'deny' ? '🚫' : '✅';
-      const effectLabel = proposal.effect === 'deny' ? 'Always deny' : 'Always allow';
+      const effectLabel =
+        proposal.effect === 'deny' ? 'Always deny' : 'Always allow';
+      const patternsLine = proposal.patterns.join(', ');
       keyboard.push([
         {
-          text: `${effectEmoji} ${effectLabel}: ${proposal.name}`,
+          text: `${effectEmoji} ${effectLabel}: ${proposal.description}\n${patternsLine}`,
           callback_data: `always_${requestId}`,
         },
       ]);

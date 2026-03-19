@@ -36,6 +36,7 @@ import {
   type EgressType,
 } from './permission-rule-engine/rule-engine.js';
 import {
+  type DecisionHistoryEntry,
   generateRuleProposal,
   type RuleProposal,
 } from './permission-rule-generator.js';
@@ -84,6 +85,8 @@ export interface PermissionApprovalCallbacks {
     proposal: RuleProposal | null,
     groupFolder: string,
   ) => void;
+  /** Optional: returns recent permission decisions for Haiku context. */
+  getDecisionHistory?: (groupFolder: string) => DecisionHistoryEntry[];
 }
 
 // ---------------------------------------------------------------------------
@@ -209,7 +212,8 @@ export async function checkWithApproval(
 
   // No matching rule — call Haiku then send Telegram
   const requestId = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
-  const proposal = await generateRuleProposal(egressType, subject);
+  const history = callbacks.getDecisionHistory?.(groupFolder) ?? [];
+  const proposal = await generateRuleProposal(egressType, subject, null, history);
 
   const messageId = await callbacks.sendPermissionRequest({
     requestId,
@@ -490,7 +494,9 @@ export function handleProxyPermissionResponse(
 
   if (decision === 'always' && pending?.proposal) {
     const now = new Date().toISOString();
-    const effect = (pending.proposal.effect === 'deny' ? 'deny' : 'allow') as 'allow' | 'deny';
+    const effect = (pending.proposal.effect === 'deny' ? 'deny' : 'allow') as
+      | 'allow'
+      | 'deny';
     for (const pattern of pending.proposal.patterns) {
       insertPermissionRule({
         id: `rule-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,

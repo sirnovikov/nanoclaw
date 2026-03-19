@@ -338,8 +338,7 @@ async function runAgent(
             req.toolInput,
           );
         },
-        getDecisionHistory: () =>
-          getRecentPermissionDecisions(group.folder),
+        getDecisionHistory: () => getRecentPermissionDecisions(group.folder),
       },
     );
 
@@ -530,6 +529,8 @@ async function main(): Promise<void> {
         // Rule persistence is handled inside handleProxyPermissionResponse
         // which is called from channelOpts.onPermissionResponse above.
       },
+      getDecisionHistory: (groupFolder) =>
+        getRecentPermissionDecisions(groupFolder),
     },
   );
 
