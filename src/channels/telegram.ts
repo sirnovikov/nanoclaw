@@ -176,7 +176,7 @@ export class TelegramChannel implements Channel {
     this.bot.on('callback_query:data', async (ctx) => {
       const data = ctx.callbackQuery.data;
       // Format: once_<reqId> | always_<reqId> | deny_<reqId>
-      const match = data.match(/^(once|always|deny)_(.+)$/);
+      const match = data.match(/^(once|always-allow|always-deny|always|deny)_(.+)$/);
       if (!match) return;
 
       const [, action, requestId] = match;
@@ -190,11 +190,21 @@ export class TelegramChannel implements Channel {
         return;
       }
 
-      const decision = action as 'once' | 'always' | 'deny';
+      // Map action to decision (always-allow/always-deny both map to 'always')
+      const decision: 'once' | 'always' | 'deny' =
+        action === 'always-allow' || action === 'always-deny' || action === 'always'
+          ? 'always'
+          : (action as 'once' | 'deny');
       this.opts.onPermissionResponse?.(group.folder, requestId, decision);
 
-      const label = decision === 'deny' ? '❌ Denied' : '✅ Approved';
-      await ctx.answerCallbackQuery({ text: label });
+      const labelMap: Record<string, string> = {
+        once: '✅ Approved (once)',
+        deny: '❌ Denied',
+        'always-allow': '✅ Rule saved (always allow)',
+        'always-deny': '🚫 Rule saved (always deny)',
+        always: '✅ Rule saved',
+      };
+      await ctx.answerCallbackQuery({ text: labelMap[action] ?? '✅ Done' });
 
       try {
         await ctx.editMessageReplyMarkup({
@@ -383,10 +393,12 @@ export class TelegramChannel implements Channel {
       const effectLabel =
         proposal.effect === 'deny' ? 'Always deny' : 'Always allow';
       const patternsLine = proposal.patterns.join(', ');
+      const callbackAction =
+        proposal.effect === 'deny' ? 'always-deny' : 'always-allow';
       keyboard.push([
         {
           text: `${effectEmoji} ${effectLabel}: ${proposal.description}\n${patternsLine}`,
-          callback_data: `always_${requestId}`,
+          callback_data: `${callbackAction}_${requestId}`,
         },
       ]);
     }
