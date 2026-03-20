@@ -1,8 +1,21 @@
-import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
-import http from 'http';
-import type { AddressInfo } from 'net';
+import http from 'node:http';
+import net from 'node:net';
+import type { AddressInfo } from 'node:net';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
-const mockEnv: Record<string, string> = {};
+// Detect whether listen() works (sandboxed environments may block it)
+const canListen = await new Promise<boolean>((resolve) => {
+  const s = net.createServer();
+  s.on('error', () => resolve(false));
+  s.listen(0, '127.0.0.1', () => {
+    s.close(() => resolve(true));
+  });
+});
+
+const { mockEnv } = vi.hoisted(() => ({
+  mockEnv: {} as Record<string, string>,
+}));
+
 vi.mock('./env.js', () => ({
   readEnvFile: vi.fn(() => ({ ...mockEnv })),
 }));
@@ -11,7 +24,16 @@ vi.mock('./logger.js', () => ({
   logger: { info: vi.fn(), error: vi.fn(), debug: vi.fn(), warn: vi.fn() },
 }));
 
-import { startCredentialProxy } from './credential-proxy.js';
+import {
+  type PermissionApprovalCallbacks,
+  startCredentialProxy,
+} from './credential-proxy.js';
+
+const mockApprovalCallbacks: PermissionApprovalCallbacks = {
+  resolveGroup: vi.fn().mockReturnValue(null),
+  sendPermissionRequest: vi.fn().mockResolvedValue(null),
+  onPermissionResponse: vi.fn(),
+};
 
 function makeRequest(
   port: number,
@@ -30,7 +52,7 @@ function makeRequest(
         res.on('data', (c) => chunks.push(c));
         res.on('end', () => {
           resolve({
-            statusCode: res.statusCode!,
+            statusCode: res.statusCode ?? 0,
             body: Buffer.concat(chunks).toString(),
             headers: res.headers,
           });
@@ -43,7 +65,7 @@ function makeRequest(
   });
 }
 
-describe('credential-proxy', () => {
+describe.skipIf(!canListen)('credential-proxy', () => {
   let proxyServer: http.Server;
   let upstreamServer: http.Server;
   let proxyPort: number;
@@ -74,7 +96,11 @@ describe('credential-proxy', () => {
     Object.assign(mockEnv, env, {
       ANTHROPIC_BASE_URL: `http://127.0.0.1:${upstreamPort}`,
     });
-    proxyServer = await startCredentialProxy(0);
+    proxyServer = await startCredentialProxy(
+      0,
+      '127.0.0.1',
+      mockApprovalCallbacks,
+    );
     return (proxyServer.address() as AddressInfo).port;
   }
 
@@ -115,9 +141,7 @@ describe('credential-proxy', () => {
       '{}',
     );
 
-    expect(lastUpstreamHeaders['authorization']).toBe(
-      'Bearer real-oauth-token',
-    );
+    expect(lastUpstreamHeaders.authorization).toBe('Bearer real-oauth-token');
   });
 
   it('OAuth mode does not inject Authorization when container omits it', async () => {
@@ -140,7 +164,7 @@ describe('credential-proxy', () => {
     );
 
     expect(lastUpstreamHeaders['x-api-key']).toBe('temp-key-from-exchange');
-    expect(lastUpstreamHeaders['authorization']).toBeUndefined();
+    expect(lastUpstreamHeaders.authorization).toBeUndefined();
   });
 
   it('strips hop-by-hop headers', async () => {
@@ -173,7 +197,11 @@ describe('credential-proxy', () => {
       ANTHROPIC_API_KEY: 'sk-ant-real-key',
       ANTHROPIC_BASE_URL: 'http://127.0.0.1:59999',
     });
-    proxyServer = await startCredentialProxy(0);
+    proxyServer = await startCredentialProxy(
+      0,
+      '127.0.0.1',
+      mockApprovalCallbacks,
+    );
     proxyPort = (proxyServer.address() as AddressInfo).port;
 
     const res = await makeRequest(

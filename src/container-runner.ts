@@ -2,9 +2,10 @@
  * Container Runner for NanoClaw
  * Spawns agent execution in containers and handles IPC
  */
-import { ChildProcess, exec, spawn } from 'child_process';
-import fs from 'fs';
-import path from 'path';
+import { type ChildProcess, exec, execSync, spawn } from 'node:child_process';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
 
 import {
   CONTAINER_IMAGE,
@@ -16,8 +17,10 @@ import {
   IDLE_TIMEOUT,
   TIMEZONE,
 } from './config.js';
-import { resolveGroupFolderPath, resolveGroupIpcPath } from './group-folder.js';
-import { logger } from './logger.js';
+import {
+  deregisterContainerGroup,
+  registerContainerGroup,
+} from './container-group-registry.js';
 import {
   CONTAINER_HOST_GATEWAY,
   CONTAINER_RUNTIME_BIN,
@@ -25,9 +28,14 @@ import {
   readonlyMountArgs,
   stopContainer,
 } from './container-runtime.js';
+import type { PermissionRequest } from './credential-proxy.js';
 import { detectAuthMode } from './credential-proxy.js';
+import { resolveGroupFolderPath, resolveGroupIpcPath } from './group-folder.js';
+import { logger } from './logger.js';
+import { createMcpBridge } from './mcp-bridge.js';
+import type { DecisionHistoryEntry } from './permission-rule-generator.js';
 import { validateAdditionalMounts } from './mount-security.js';
-import { RegisteredGroup } from './types.js';
+import type { RegisteredGroup } from './types.js';
 
 // Sentinel markers for robust output parsing (must match agent-runner)
 const OUTPUT_START_MARKER = '---NANOCLAW_OUTPUT_START---';
@@ -41,6 +49,7 @@ export interface ContainerInput {
   isMain: boolean;
   isScheduledTask?: boolean;
   assistantName?: string;
+  mcpBridges?: Array<{ name: string; command: string; args: string[] }>;
 }
 
 export interface ContainerOutput {
@@ -48,6 +57,75 @@ export interface ContainerOutput {
   result: string | null;
   newSessionId?: string;
   error?: string;
+}
+
+export interface BridgePermissionDeps {
+  sendPermissionRequest: (req: PermissionRequest) => Promise<number | null>;
+  getDecisionHistory: () => DecisionHistoryEntry[];
+}
+
+interface McpServerConfig {
+  command?: string;
+  args?: string[];
+  url?: string;
+  type?: string;
+  headers?: Record<string, string>;
+}
+
+interface McpConfig {
+  mcpServers?: Record<string, McpServerConfig>;
+}
+
+export interface ParsedMcpConfig {
+  localServers: Record<string, McpServerConfig>;
+  remoteServers: Record<
+    string,
+    { url: string; headers?: Record<string, string> }
+  >;
+}
+
+export function parseGroupMcpConfig(groupDir: string): ParsedMcpConfig {
+  const mcpJsonPath = path.join(groupDir, '.mcp.json');
+  const result: ParsedMcpConfig = { localServers: {}, remoteServers: {} };
+
+  try {
+    if (!fs.existsSync(mcpJsonPath)) return result;
+    const config = JSON.parse(
+      fs.readFileSync(mcpJsonPath, 'utf-8'),
+    ) as McpConfig;
+    if (!config.mcpServers) return result;
+
+    for (const [name, server] of Object.entries(config.mcpServers)) {
+      if (server.url || server.type === 'http') {
+        result.remoteServers[name] = {
+          url: server.url ?? '',
+          headers: server.headers,
+        };
+      } else {
+        result.localServers[name] = server;
+      }
+    }
+  } catch (err) {
+    logger.warn({ groupDir, err }, 'Failed to parse .mcp.json');
+  }
+
+  return result;
+}
+
+export function generateShadowMcpConfig(
+  localServers: Record<string, McpServerConfig>,
+): string {
+  // Always write a shadow config, even if empty.
+  // This shadows the original .mcp.json so the container SDK doesn't
+  // see remote servers (which would bypass the bridge and fail due to
+  // network isolation).
+  const shadow = { mcpServers: localServers };
+  const tmpPath = path.join(
+    os.tmpdir(),
+    `nanoclaw-mcp-${Date.now()}-${Math.random().toString(36).slice(2, 6)}.json`,
+  );
+  fs.writeFileSync(tmpPath, JSON.stringify(shadow, null, 2));
+  return tmpPath;
 }
 
 interface VolumeMount {
@@ -132,7 +210,7 @@ function buildVolumeMounts(
   if (!fs.existsSync(settingsFile)) {
     fs.writeFileSync(
       settingsFile,
-      JSON.stringify(
+      `${JSON.stringify(
         {
           env: {
             // Enable agent swarms (subagent orchestration)
@@ -148,7 +226,7 @@ function buildVolumeMounts(
         },
         null,
         2,
-      ) + '\n',
+      )}\n`,
     );
   }
 
@@ -181,28 +259,19 @@ function buildVolumeMounts(
     readonly: false,
   });
 
-  // Copy agent-runner source into a per-group writable location so agents
-  // can customize it (add tools, change behavior) without affecting other
-  // groups. Recompiled on container startup via entrypoint.sh.
+  // Mount canonical agent-runner source read-only. Every container gets the
+  // same trusted code — no per-group copies that can go stale or be tampered
+  // with. Recompiled on container startup via entrypoint.sh.
   const agentRunnerSrc = path.join(
     projectRoot,
     'container',
     'agent-runner',
     'src',
   );
-  const groupAgentRunnerDir = path.join(
-    DATA_DIR,
-    'sessions',
-    group.folder,
-    'agent-runner-src',
-  );
-  if (!fs.existsSync(groupAgentRunnerDir) && fs.existsSync(agentRunnerSrc)) {
-    fs.cpSync(agentRunnerSrc, groupAgentRunnerDir, { recursive: true });
-  }
   mounts.push({
-    hostPath: groupAgentRunnerDir,
+    hostPath: agentRunnerSrc,
     containerPath: '/app/src',
-    readonly: false,
+    readonly: true,
   });
 
   // Additional mounts validated against external allowlist (tamper-proof from containers)
@@ -223,6 +292,14 @@ function buildContainerArgs(
   containerName: string,
 ): string[] {
   const args: string[] = ['run', '-i', '--rm', '--name', containerName];
+
+  // Drop all Linux capabilities and prevent privilege escalation.
+  // --cap-drop ALL removes CAP_NET_RAW (raw sockets) and CAP_NET_ADMIN (routing
+  // changes), which are the primitives needed to bypass HTTP_PROXY at the network
+  // layer. Standard TCP connections (which honour proxy env vars) don't need caps.
+  // --security-opt no-new-privileges blocks setuid/setgid escalation paths.
+  args.push('--cap-drop', 'ALL');
+  args.push('--security-opt', 'no-new-privileges');
 
   // Pass host timezone so container's local time matches the user's
   args.push('-e', `TZ=${TIMEZONE}`);
@@ -282,6 +359,31 @@ function buildContainerArgs(
     `ANTHROPIC_BASE_URL=http://${CONTAINER_HOST_GATEWAY}:${CREDENTIAL_PROXY_PORT}`,
   );
 
+  // Network isolation: attach to the nanoclaw-proxy bridge and route all
+  // HTTP/HTTPS through the credential proxy.
+  //
+  // Network isolation strategy is platform-specific (see scripts/):
+  //   macOS: iptables rules injected into the Docker Desktop VM via a
+  //          privileged container block FORWARD chain traffic from this bridge
+  //          to the internet, while preserving the host.docker.internal tunnel
+  //          (which Docker Desktop handles outside iptables).
+  //   Linux: the nanoclaw-proxy network uses --internal, so no default route
+  //          exists outside the bridge subnet.
+  //
+  // 'host-gateway' resolves to the host IP as seen by the Docker runtime
+  // (on macOS: the Mac host via Docker Desktop's tunnel; on Linux: the bridge
+  // gateway). This makes host.docker.internal reachable on both platforms.
+  args.push('--network', 'nanoclaw-proxy');
+  args.push('--add-host', 'host.docker.internal:host-gateway');
+  const proxyUrl = `http://${CONTAINER_HOST_GATEWAY}:${CREDENTIAL_PROXY_PORT}`;
+  args.push('-e', `HTTP_PROXY=${proxyUrl}`);
+  args.push('-e', `HTTPS_PROXY=${proxyUrl}`);
+  args.push('-e', `http_proxy=${proxyUrl}`);
+  args.push('-e', `https_proxy=${proxyUrl}`);
+  const noProxy = 'localhost,127.0.0.1,host.docker.internal';
+  args.push('-e', `NO_PROXY=${noProxy}`);
+  args.push('-e', `no_proxy=${noProxy}`);
+
   // Mirror the host's auth method with a placeholder value.
   // API key mode: SDK sends x-api-key, proxy replaces with real key.
   // OAuth mode:   SDK exchanges placeholder token for temp API key,
@@ -319,11 +421,26 @@ function buildContainerArgs(
   return args;
 }
 
+async function getContainerNetworkIp(
+  containerName: string,
+): Promise<string | null> {
+  const cmd = `${CONTAINER_RUNTIME_BIN} inspect --format '{{(index .NetworkSettings.Networks "nanoclaw-proxy").IPAddress}}' ${containerName}`;
+  for (let attempt = 0; attempt < 5; attempt++) {
+    if (attempt > 0) await new Promise((r) => setTimeout(r, 300 * attempt));
+    const ip = await new Promise<string | null>((resolve) => {
+      exec(cmd, (err, stdout) => resolve(err ? null : stdout.trim() || null));
+    });
+    if (ip) return ip;
+  }
+  return null;
+}
+
 export async function runContainerAgent(
   group: RegisteredGroup,
   input: ContainerInput,
   onProcess: (proc: ChildProcess, containerName: string) => void,
   onOutput?: (output: ContainerOutput) => Promise<void>,
+  bridgeDeps?: BridgePermissionDeps,
 ): Promise<ContainerOutput> {
   const startTime = Date.now();
 
@@ -331,6 +448,69 @@ export async function runContainerAgent(
   fs.mkdirSync(groupDir, { recursive: true });
 
   const mounts = buildVolumeMounts(group, input.isMain);
+
+  // MCP bridge setup: parse group's .mcp.json and spawn bridges for remote servers
+  const bridgeCleanups: Array<() => void> = [];
+  let shadowMcpPath: string | null = null;
+  let inputWithBridges = input;
+
+  if (bridgeDeps) {
+    const mcpConfig = parseGroupMcpConfig(groupDir);
+    const remoteNames = Object.keys(mcpConfig.remoteServers);
+
+    if (remoteNames.length > 0) {
+      const bridgePorts: Record<string, number> = {};
+
+      for (const name of remoteNames) {
+        const remote = mcpConfig.remoteServers[name];
+        if (!remote) continue;
+        const bridge = createMcpBridge(
+          { name, url: remote.url, headers: remote.headers },
+          {
+            sendPermissionRequest: bridgeDeps.sendPermissionRequest,
+            getDecisionHistory: bridgeDeps.getDecisionHistory,
+            groupFolder: group.folder,
+            chatJid: input.chatJid,
+          },
+        );
+        // Use TCP instead of Unix sockets — Unix sockets don't cross
+        // Docker Desktop's macOS VM boundary.
+        const { port, cleanup } = await bridge.listenTcp();
+        bridgeCleanups.push(cleanup);
+        bridgePorts[name] = port;
+      }
+
+      // Generate shadow .mcp.json with only local servers.
+      // Always mount — even if empty — so the SDK doesn't see remote
+      // servers from the original .mcp.json (they'd bypass the bridge).
+      shadowMcpPath = generateShadowMcpConfig(mcpConfig.localServers);
+      mounts.push({
+        hostPath: shadowMcpPath,
+        containerPath: '/workspace/group/.mcp.json',
+        readonly: true,
+      });
+
+      // Pass bridge configs in container input.
+      // Container connects to host via host.docker.internal:PORT.
+      inputWithBridges = {
+        ...input,
+        mcpBridges: remoteNames.map((name) => ({
+          name,
+          command: 'node',
+          args: [
+            '/tmp/dist/bridge-client.js',
+            `host.docker.internal:${bridgePorts[name]}`,
+          ],
+        })),
+      };
+
+      logger.info(
+        { group: group.name, bridges: remoteNames, bridgePorts },
+        'MCP bridges spawned for remote servers',
+      );
+    }
+  }
+
   const safeName = group.folder.replace(/[^a-zA-Z0-9-]/g, '-');
   const containerName = `nanoclaw-${safeName}-${Date.now()}`;
   const containerArgs = buildContainerArgs(mounts, containerName);
@@ -361,20 +541,65 @@ export async function runContainerAgent(
   const logsDir = path.join(groupDir, 'logs');
   fs.mkdirSync(logsDir, { recursive: true });
 
+  /** Clean up bridge sockets, listeners, and shadow config. */
+  const cleanupBridges = () => {
+    for (const cleanup of bridgeCleanups) {
+      try {
+        cleanup();
+      } catch {
+        /* ignore */
+      }
+    }
+    if (shadowMcpPath) {
+      try {
+        fs.unlinkSync(shadowMcpPath);
+      } catch {
+        /* ignore */
+      }
+    }
+  };
+
+  const container = spawn(CONTAINER_RUNTIME_BIN, containerArgs, {
+    stdio: ['pipe', 'pipe', 'pipe'],
+  });
+
+  onProcess(container, containerName);
+
+  // Register container IP — MUST succeed before agent starts
+  const containerIp = await getContainerNetworkIp(containerName);
+  if (!containerIp) {
+    logger.error(
+      { containerName },
+      'Failed to get container IP — agent cannot use network',
+    );
+    cleanupBridges();
+    try {
+      execSync(`${CONTAINER_RUNTIME_BIN} kill ${containerName}`, {
+        stdio: 'ignore',
+      });
+    } catch {
+      /* ignore */
+    }
+    throw new Error(`Container ${containerName} failed to register network IP`);
+  }
+  registerContainerGroup(containerIp, {
+    groupFolder: group.folder,
+    chatJid: input.chatJid,
+  });
+  container.once('close', () => {
+    deregisterContainerGroup(containerIp);
+    cleanupBridges();
+  });
+
+  // Write input and wait for completion
+  container.stdin.write(JSON.stringify(inputWithBridges));
+  container.stdin.end();
+
   return new Promise((resolve) => {
-    const container = spawn(CONTAINER_RUNTIME_BIN, containerArgs, {
-      stdio: ['pipe', 'pipe', 'pipe'],
-    });
-
-    onProcess(container, containerName);
-
     let stdout = '';
     let stderr = '';
     let stdoutTruncated = false;
     let stderrTruncated = false;
-
-    container.stdin.write(JSON.stringify(input));
-    container.stdin.end();
 
     // Streaming output: parse OUTPUT_START/END marker pairs as they arrive
     let parseBuffer = '';
@@ -403,7 +628,8 @@ export async function runContainerAgent(
       if (onOutput) {
         parseBuffer += chunk;
         let startIdx: number;
-        while ((startIdx = parseBuffer.indexOf(OUTPUT_START_MARKER)) !== -1) {
+        startIdx = parseBuffer.indexOf(OUTPUT_START_MARKER);
+        while (startIdx !== -1) {
           const endIdx = parseBuffer.indexOf(OUTPUT_END_MARKER, startIdx);
           if (endIdx === -1) break; // Incomplete pair, wait for more data
 
@@ -429,6 +655,7 @@ export async function runContainerAgent(
               'Failed to parse streamed output chunk',
             );
           }
+          startIdx = parseBuffer.indexOf(OUTPUT_START_MARKER);
         }
       }
     });
@@ -647,7 +874,7 @@ export async function runContainerAgent(
         } else {
           // Fallback: last non-empty line (backwards compatibility)
           const lines = stdout.trim().split('\n');
-          jsonLine = lines[lines.length - 1];
+          jsonLine = lines[lines.length - 1] ?? '';
         }
 
         const output: ContainerOutput = JSON.parse(jsonLine);
@@ -739,7 +966,7 @@ export function writeGroupsSnapshot(
   groupFolder: string,
   isMain: boolean,
   groups: AvailableGroup[],
-  registeredJids: Set<string>,
+  _registeredJids: Set<string>,
 ): void {
   const groupIpcDir = resolveGroupIpcPath(groupFolder);
   fs.mkdirSync(groupIpcDir, { recursive: true });

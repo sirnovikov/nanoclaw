@@ -1,14 +1,13 @@
-import fs from 'fs';
-import path from 'path';
-
+import fs from 'node:fs';
+import path from 'node:path';
 import { CronExpressionParser } from 'cron-parser';
 
 import { DATA_DIR, IPC_POLL_INTERVAL, TIMEZONE } from './config.js';
-import { AvailableGroup } from './container-runner.js';
+import type { AvailableGroup } from './container-runner.js';
 import { createTask, deleteTask, getTaskById, updateTask } from './db.js';
 import { isValidGroupFolder } from './group-folder.js';
 import { logger } from './logger.js';
-import { RegisteredGroup } from './types.js';
+import type { RegisteredGroup } from './types.js';
 
 export interface IpcDeps {
   sendMessage: (jid: string, text: string) => Promise<void>;
@@ -24,16 +23,10 @@ export interface IpcDeps {
   ) => void;
 }
 
-let ipcWatcherRunning = false;
-
-export function startIpcWatcher(deps: IpcDeps): void {
-  if (ipcWatcherRunning) {
-    logger.debug('IPC watcher already running, skipping duplicate start');
-    return;
-  }
-  ipcWatcherRunning = true;
-
-  const ipcBaseDir = path.join(DATA_DIR, 'ipc');
+export function startIpcWatcher(
+  deps: IpcDeps,
+  ipcBaseDir = path.join(DATA_DIR, 'ipc'),
+): void {
   fs.mkdirSync(ipcBaseDir, { recursive: true });
 
   const processIpcFiles = async () => {
@@ -227,7 +220,7 @@ export async function processTaskIpc(
           }
         } else if (scheduleType === 'interval') {
           const ms = parseInt(data.schedule_value, 10);
-          if (isNaN(ms) || ms <= 0) {
+          if (Number.isNaN(ms) || ms <= 0) {
             logger.warn(
               { scheduleValue: data.schedule_value },
               'Invalid interval',
@@ -237,7 +230,7 @@ export async function processTaskIpc(
           nextRun = new Date(Date.now() + ms).toISOString();
         } else if (scheduleType === 'once') {
           const date = new Date(data.schedule_value);
-          if (isNaN(date.getTime())) {
+          if (Number.isNaN(date.getTime())) {
             logger.warn(
               { scheduleValue: data.schedule_value },
               'Invalid timestamp',
@@ -377,7 +370,7 @@ export async function processTaskIpc(
             }
           } else if (updatedTask.schedule_type === 'interval') {
             const ms = parseInt(updatedTask.schedule_value, 10);
-            if (!isNaN(ms) && ms > 0) {
+            if (!Number.isNaN(ms) && ms > 0) {
               updates.next_run = new Date(Date.now() + ms).toISOString();
             }
           }

@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach } from 'vitest';
+import { beforeEach, describe, expect, it } from 'vitest';
 
 import {
   _initTestDatabase,
@@ -8,7 +8,9 @@ import {
   getAllRegisteredGroups,
   getMessagesSince,
   getNewMessages,
+  getRecentPermissionDecisions,
   getTaskById,
+  logPermissionDecision,
   setRegisteredGroup,
   storeChatMetadata,
   storeMessage,
@@ -61,10 +63,10 @@ describe('storeMessage', () => {
       'Andy',
     );
     expect(messages).toHaveLength(1);
-    expect(messages[0].id).toBe('msg-1');
-    expect(messages[0].sender).toBe('123@s.whatsapp.net');
-    expect(messages[0].sender_name).toBe('Alice');
-    expect(messages[0].content).toBe('hello world');
+    expect(messages[0]?.id).toBe('msg-1');
+    expect(messages[0]?.sender).toBe('123@s.whatsapp.net');
+    expect(messages[0]?.sender_name).toBe('Alice');
+    expect(messages[0]?.content).toBe('hello world');
   });
 
   it('filters out empty content', () => {
@@ -136,7 +138,7 @@ describe('storeMessage', () => {
       'Andy',
     );
     expect(messages).toHaveLength(1);
-    expect(messages[0].content).toBe('updated');
+    expect(messages[0]?.content).toBe('updated');
   });
 });
 
@@ -189,7 +191,7 @@ describe('getMessagesSince', () => {
     );
     // Should exclude m1, m2 (before/at timestamp), m3 (bot message)
     expect(msgs).toHaveLength(1);
-    expect(msgs[0].content).toBe('third');
+    expect(msgs[0]?.content).toBe('third');
   });
 
   it('excludes bot messages via is_bot_message flag', () => {
@@ -288,7 +290,7 @@ describe('getNewMessages', () => {
     );
     // Only g1 msg2 (after ts, not bot)
     expect(messages).toHaveLength(1);
-    expect(messages[0].content).toBe('g1 msg2');
+    expect(messages[0]?.content).toBe('g1 msg2');
   });
 
   it('returns empty for no registered groups', () => {
@@ -305,14 +307,14 @@ describe('storeChatMetadata', () => {
     storeChatMetadata('group@g.us', '2024-01-01T00:00:00.000Z');
     const chats = getAllChats();
     expect(chats).toHaveLength(1);
-    expect(chats[0].jid).toBe('group@g.us');
-    expect(chats[0].name).toBe('group@g.us');
+    expect(chats[0]?.jid).toBe('group@g.us');
+    expect(chats[0]?.name).toBe('group@g.us');
   });
 
   it('stores chat with explicit name', () => {
     storeChatMetadata('group@g.us', '2024-01-01T00:00:00.000Z', 'My Group');
     const chats = getAllChats();
-    expect(chats[0].name).toBe('My Group');
+    expect(chats[0]?.name).toBe('My Group');
   });
 
   it('updates name on subsequent call with name', () => {
@@ -320,14 +322,14 @@ describe('storeChatMetadata', () => {
     storeChatMetadata('group@g.us', '2024-01-01T00:00:01.000Z', 'Updated Name');
     const chats = getAllChats();
     expect(chats).toHaveLength(1);
-    expect(chats[0].name).toBe('Updated Name');
+    expect(chats[0]?.name).toBe('Updated Name');
   });
 
   it('preserves newer timestamp on conflict', () => {
     storeChatMetadata('group@g.us', '2024-01-01T00:00:05.000Z');
     storeChatMetadata('group@g.us', '2024-01-01T00:00:01.000Z');
     const chats = getAllChats();
-    expect(chats[0].last_message_time).toBe('2024-01-01T00:00:05.000Z');
+    expect(chats[0]?.last_message_time).toBe('2024-01-01T00:00:05.000Z');
   });
 });
 
@@ -350,8 +352,8 @@ describe('task CRUD', () => {
 
     const task = getTaskById('task-1');
     expect(task).toBeDefined();
-    expect(task!.prompt).toBe('do something');
-    expect(task!.status).toBe('active');
+    expect(task?.prompt).toBe('do something');
+    expect(task?.status).toBe('active');
   });
 
   it('updates task status', () => {
@@ -369,7 +371,7 @@ describe('task CRUD', () => {
     });
 
     updateTask('task-2', { status: 'paused' });
-    expect(getTaskById('task-2')!.status).toBe('paused');
+    expect(getTaskById('task-2')?.status).toBe('paused');
   });
 
   it('deletes a task and its run logs', () => {
@@ -417,10 +419,12 @@ describe('message query LIMIT', () => {
       3,
     );
     expect(messages).toHaveLength(3);
-    expect(messages[0].content).toBe('message 8');
-    expect(messages[2].content).toBe('message 10');
+    expect(messages[0]?.content).toBe('message 8');
+    expect(messages[2]?.content).toBe('message 10');
     // Chronological order preserved
-    expect(messages[1].timestamp > messages[0].timestamp).toBe(true);
+    expect(
+      (messages[1]?.timestamp ?? '') > (messages[0]?.timestamp ?? ''),
+    ).toBe(true);
     // newTimestamp reflects latest returned row
     expect(newTimestamp).toBe('2024-01-01T00:00:10.000Z');
   });
@@ -433,9 +437,11 @@ describe('message query LIMIT', () => {
       3,
     );
     expect(messages).toHaveLength(3);
-    expect(messages[0].content).toBe('message 8');
-    expect(messages[2].content).toBe('message 10');
-    expect(messages[1].timestamp > messages[0].timestamp).toBe(true);
+    expect(messages[0]?.content).toBe('message 8');
+    expect(messages[2]?.content).toBe('message 10');
+    expect(
+      (messages[1]?.timestamp ?? '') > (messages[0]?.timestamp ?? ''),
+    ).toBe(true);
   });
 
   it('returns all messages when count is under the limit', () => {
@@ -464,8 +470,8 @@ describe('registered group isMain', () => {
     const groups = getAllRegisteredGroups();
     const group = groups['main@s.whatsapp.net'];
     expect(group).toBeDefined();
-    expect(group.isMain).toBe(true);
-    expect(group.folder).toBe('whatsapp_main');
+    expect(group?.isMain).toBe(true);
+    expect(group?.folder).toBe('whatsapp_main');
   });
 
   it('omits isMain for non-main groups', () => {
@@ -479,6 +485,111 @@ describe('registered group isMain', () => {
     const groups = getAllRegisteredGroups();
     const group = groups['group@g.us'];
     expect(group).toBeDefined();
-    expect(group.isMain).toBeUndefined();
+    expect(group?.isMain).toBeUndefined();
+  });
+});
+
+// --- permission audit log ---
+
+describe('permission audit log', () => {
+  it('logPermissionDecision inserts a record retrievable by getRecentPermissionDecisions', () => {
+    logPermissionDecision({
+      egress_type: 'http',
+      subject: 'https://example.com',
+      decision: 'allow',
+      group_folder: 'telegram_main',
+    });
+
+    const entries = getRecentPermissionDecisions('telegram_main');
+    expect(entries).toHaveLength(1);
+    expect(entries[0]?.egress_type).toBe('http');
+    expect(entries[0]?.subject).toBe('https://example.com');
+    expect(entries[0]?.decision).toBe('allow');
+    expect(entries[0]?.group_folder).toBe('telegram_main');
+    expect(entries[0]?.created_at).toBeDefined();
+  });
+
+  it('getRecentPermissionDecisions returns results in reverse chronological order', () => {
+    logPermissionDecision({
+      egress_type: 'http',
+      subject: 'https://alpha.com',
+      decision: 'allow',
+      group_folder: 'telegram_main',
+    });
+    logPermissionDecision({
+      egress_type: 'http',
+      subject: 'https://beta.com',
+      decision: 'deny',
+      group_folder: 'telegram_main',
+    });
+    logPermissionDecision({
+      egress_type: 'connect',
+      subject: 'gamma.com:443',
+      decision: 'allow',
+      group_folder: 'telegram_main',
+    });
+
+    const entries = getRecentPermissionDecisions('telegram_main');
+    expect(entries).toHaveLength(3);
+    // All subjects returned
+    const subjects = entries.map((e) => e.subject);
+    expect(subjects).toContain('https://alpha.com');
+    expect(subjects).toContain('https://beta.com');
+    expect(subjects).toContain('gamma.com:443');
+    // created_at is non-ascending (DESC order is maintained)
+    for (let i = 0; i < entries.length - 1; i++) {
+      expect(
+        (entries[i]?.created_at ?? '') >= (entries[i + 1]?.created_at ?? ''),
+      ).toBe(true);
+    }
+  });
+
+  it('getRecentPermissionDecisions respects the limit parameter', () => {
+    for (let i = 1; i <= 5; i++) {
+      logPermissionDecision({
+        egress_type: 'http',
+        subject: `https://site-${i}.com`,
+        decision: 'allow',
+        group_folder: 'telegram_main',
+      });
+    }
+
+    const all = getRecentPermissionDecisions('telegram_main');
+    const limited = getRecentPermissionDecisions('telegram_main', 3);
+    expect(all).toHaveLength(5);
+    expect(limited).toHaveLength(3);
+    // The 3 limited results must be the same leading elements as the full list
+    expect(limited[0]).toEqual(all[0]);
+    expect(limited[1]).toEqual(all[1]);
+    expect(limited[2]).toEqual(all[2]);
+  });
+
+  it('getRecentPermissionDecisions filters by groupFolder', () => {
+    logPermissionDecision({
+      egress_type: 'http',
+      subject: 'https://group-a.com',
+      decision: 'allow',
+      group_folder: 'telegram_groupa',
+    });
+    logPermissionDecision({
+      egress_type: 'http',
+      subject: 'https://group-b.com',
+      decision: 'deny',
+      group_folder: 'telegram_groupb',
+    });
+
+    const entriesA = getRecentPermissionDecisions('telegram_groupa');
+    expect(entriesA).toHaveLength(1);
+    expect(entriesA[0]?.subject).toBe('https://group-a.com');
+
+    const entriesB = getRecentPermissionDecisions('telegram_groupb');
+    expect(entriesB).toHaveLength(1);
+    expect(entriesB[0]?.subject).toBe('https://group-b.com');
+  });
+
+  it('getRecentPermissionDecisions returns empty array when no decisions exist', () => {
+    const entries = getRecentPermissionDecisions('telegram_nonexistent');
+    expect(entries).toHaveLength(0);
+    expect(entries).toEqual([]);
   });
 });

@@ -1,13 +1,13 @@
-import fs from 'fs';
-import os from 'os';
-import path from 'path';
-import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
+import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 
 import {
   isSenderAllowed,
   isTriggerAllowed,
   loadSenderAllowlist,
-  SenderAllowlistConfig,
+  type SenderAllowlistConfig,
   shouldDropMessage,
 } from './sender-allowlist.js';
 
@@ -75,8 +75,8 @@ describe('loadSenderAllowlist', () => {
       chats: { 'group-a': { allow: ['alice'], mode: 'drop' } },
     });
     const cfg = loadSenderAllowlist(p);
-    expect(cfg.chats['group-a'].allow).toEqual(['alice']);
-    expect(cfg.chats['group-a'].mode).toBe('drop');
+    expect(cfg.chats['group-a']?.allow).toEqual(['alice']);
+    expect(cfg.chats['group-a']?.mode).toBe('drop');
   });
 
   it('returns allow-all on invalid JSON', () => {
@@ -110,8 +110,8 @@ describe('loadSenderAllowlist', () => {
       },
     });
     const cfg = loadSenderAllowlist(p);
-    expect(cfg.chats['good']).toBeDefined();
-    expect(cfg.chats['bad']).toBeUndefined();
+    expect(cfg.chats.good).toBeDefined();
+    expect(cfg.chats.bad).toBeUndefined();
   });
 });
 

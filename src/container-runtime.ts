@@ -2,9 +2,9 @@
  * Container runtime abstraction for NanoClaw.
  * All runtime-specific logic lives here so swapping runtimes means changing one file.
  */
-import { execSync } from 'child_process';
-import fs from 'fs';
-import os from 'os';
+import { execSync } from 'node:child_process';
+import fs from 'node:fs';
+import os from 'node:os';
 
 import { logger } from './logger.js';
 
@@ -16,7 +16,9 @@ export const CONTAINER_HOST_GATEWAY = 'host.docker.internal';
 
 /**
  * Address the credential proxy binds to.
- * Docker Desktop (macOS): 127.0.0.1 — the VM routes host.docker.internal to loopback.
+ * Docker Desktop (macOS): 0.0.0.0 — host.docker.internal resolves to an IPv6
+ *   gateway address on --internal networks, so loopback isn't reachable.
+ *   Binding to all interfaces lets containers reach the proxy on any address.
  * Docker (Linux): bind to the docker0 bridge IP so only containers can reach it,
  *   falling back to 0.0.0.0 if the interface isn't found.
  */
@@ -24,7 +26,7 @@ export const PROXY_BIND_HOST =
   process.env.CREDENTIAL_PROXY_HOST || detectProxyBindHost();
 
 function detectProxyBindHost(): string {
-  if (os.platform() === 'darwin') return '127.0.0.1';
+  if (os.platform() === 'darwin') return '0.0.0.0';
 
   // WSL uses Docker Desktop (same VM routing as macOS) — loopback is correct.
   // Check /proc filesystem, not env vars — WSL_DISTRO_NAME isn't set under systemd.
@@ -32,7 +34,7 @@ function detectProxyBindHost(): string {
 
   // Bare-metal Linux: bind to the docker0 bridge IP instead of 0.0.0.0
   const ifaces = os.networkInterfaces();
-  const docker0 = ifaces['docker0'];
+  const docker0 = ifaces.docker0;
   if (docker0) {
     const ipv4 = docker0.find((a) => a.family === 'IPv4');
     if (ipv4) return ipv4.address;
@@ -47,6 +49,39 @@ export function hostGatewayArgs(): string[] {
     return ['--add-host=host.docker.internal:host-gateway'];
   }
   return [];
+}
+
+// ---------------------------------------------------------------------------
+// Proxy bridge IP (for --internal network isolation)
+// ---------------------------------------------------------------------------
+
+let _cachedBridgeIp: string | null | undefined; // undefined = not yet fetched
+
+/**
+ * Returns the gateway IP of the nanoclaw-proxy Docker bridge network.
+ * This IP is within the bridge subnet and reachable even when the network
+ * uses --internal (which blocks routing outside the subnet).
+ * Using it for --add-host and proxy URLs is what allows --internal isolation
+ * to work: the container can reach the credential proxy without a default route.
+ * Returns null if the network doesn't exist or Docker is unavailable.
+ */
+export function getProxyBridgeIp(): string | null {
+  if (_cachedBridgeIp !== undefined) return _cachedBridgeIp;
+  try {
+    const result = execSync(
+      `${CONTAINER_RUNTIME_BIN} network inspect nanoclaw-proxy --format '{{range .IPAM.Config}}{{.Gateway}}{{end}}'`,
+      { encoding: 'utf-8', stdio: 'pipe', timeout: 5000 },
+    ).trim();
+    _cachedBridgeIp = result || null;
+  } catch {
+    _cachedBridgeIp = null;
+  }
+  return _cachedBridgeIp;
+}
+
+/** @internal — for tests only. */
+export function _resetProxyBridgeIpCache(): void {
+  _cachedBridgeIp = undefined;
 }
 
 /** Returns CLI args for a readonly bind mount. */

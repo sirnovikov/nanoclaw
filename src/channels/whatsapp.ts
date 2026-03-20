@@ -1,18 +1,17 @@
-import { exec } from 'child_process';
-import fs from 'fs';
-import https from 'https';
-import path from 'path';
-import { HttpsProxyAgent } from 'https-proxy-agent';
-
+import { exec } from 'node:child_process';
+import fs from 'node:fs';
+import https from 'node:https';
+import path from 'node:path';
 import makeWASocket, {
   Browsers,
   DisconnectReason,
-  WASocket,
   fetchLatestWaWebVersion,
   makeCacheableSignalKeyStore,
   normalizeMessageContent,
   useMultiFileAuthState,
+  type WASocket,
 } from '@whiskeysockets/baileys';
+import { HttpsProxyAgent } from 'https-proxy-agent';
 
 // Create proxy agent from environment if available
 const proxyUrl =
@@ -39,7 +38,7 @@ function fetchVersionViaProxy(): Promise<[number, number, number] | undefined> {
         res.on('end', () => {
           const match = data.match(/client_revision[^0-9]*(\d+)/);
           if (match) {
-            resolve([2, 3000, parseInt(match[1], 10)]);
+            resolve([2, 3000, parseInt(match[1] ?? '0', 10)]);
           } else {
             resolve(undefined);
           }
@@ -72,13 +71,13 @@ import {
 } from '../config.js';
 import { getLastGroupSync, setLastGroupSync, updateChatName } from '../db.js';
 import { logger } from '../logger.js';
-import {
+import type {
   Channel,
-  OnInboundMessage,
   OnChatMetadata,
+  OnInboundMessage,
   RegisteredGroup,
 } from '../types.js';
-import { registerChannel, ChannelOpts } from './registry.js';
+import { type ChannelOpts, registerChannel } from './registry.js';
 
 const GROUP_SYNC_INTERVAL_MS = 24 * 60 * 60 * 1000; // 24 hours
 
@@ -263,7 +262,7 @@ export class WhatsAppChannel implements Channel {
             if (!content) continue;
 
             const sender = msg.key.participant || msg.key.remoteJid || '';
-            const senderName = msg.pushName || sender.split('@')[0];
+            const senderName = msg.pushName || sender.split('@')[0] || sender;
 
             const fromMe = msg.key.fromMe || false;
             // Detect bot messages: with own number, fromMe is reliable
@@ -390,7 +389,7 @@ export class WhatsAppChannel implements Channel {
 
   private async translateJid(jid: string): Promise<string> {
     if (!jid.endsWith('@lid')) return jid;
-    const lidUser = jid.split('@')[0].split(':')[0];
+    const lidUser = (jid.split('@')[0] ?? '').split(':')[0] ?? '';
 
     // Check local cache first
     const cached = this.lidToPhoneMap[lidUser];
@@ -406,7 +405,7 @@ export class WhatsAppChannel implements Channel {
     try {
       const pn = await this.sock.signalRepository?.lidMapping?.getPNForLID(jid);
       if (pn) {
-        const phoneJid = `${pn.split('@')[0].split(':')[0]}@s.whatsapp.net`;
+        const phoneJid = `${(pn.split('@')[0] ?? '').split(':')[0] ?? ''}@s.whatsapp.net`;
         this.lidToPhoneMap[lidUser] = phoneJid;
         logger.info(
           { lidJid: jid, phoneJid },
@@ -430,7 +429,8 @@ export class WhatsAppChannel implements Channel {
         'Flushing outgoing message queue',
       );
       while (this.outgoingQueue.length > 0) {
-        const item = this.outgoingQueue.shift()!;
+        const item = this.outgoingQueue.shift();
+        if (!item) break;
         // Send directly — queued items are already prefixed by sendMessage
         await this.sock.sendMessage(item.jid, { text: item.text });
         logger.info(

@@ -6,22 +6,18 @@
  *
  * Allowlist location: ~/.config/nanoclaw/mount-allowlist.json
  */
-import fs from 'fs';
-import os from 'os';
-import path from 'path';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
 import pino from 'pino';
 
 import { MOUNT_ALLOWLIST_PATH } from './config.js';
-import { AdditionalMount, AllowedRoot, MountAllowlist } from './types.js';
+import type { AdditionalMount, AllowedRoot, MountAllowlist } from './types.js';
 
 const logger = pino({
   level: process.env.LOG_LEVEL || 'info',
   transport: { target: 'pino-pretty', options: { colorize: true } },
 });
-
-// Cache the allowlist in memory - only reloads on process restart
-let cachedAllowlist: MountAllowlist | null = null;
-let allowlistLoadError: string | null = null;
 
 /**
  * Default blocked patterns - paths that should never be mounted
@@ -49,30 +45,22 @@ const DEFAULT_BLOCKED_PATTERNS = [
 /**
  * Load the mount allowlist from the external config location.
  * Returns null if the file doesn't exist or is invalid.
- * Result is cached in memory for the lifetime of the process.
+ * Reads fresh on each call — no caching.
  */
-export function loadMountAllowlist(): MountAllowlist | null {
-  if (cachedAllowlist !== null) {
-    return cachedAllowlist;
-  }
-
-  if (allowlistLoadError !== null) {
-    // Already tried and failed, don't spam logs
-    return null;
-  }
-
+export function loadMountAllowlist(
+  allowlistPath = MOUNT_ALLOWLIST_PATH,
+): MountAllowlist | null {
   try {
-    if (!fs.existsSync(MOUNT_ALLOWLIST_PATH)) {
-      allowlistLoadError = `Mount allowlist not found at ${MOUNT_ALLOWLIST_PATH}`;
+    if (!fs.existsSync(allowlistPath)) {
       logger.warn(
-        { path: MOUNT_ALLOWLIST_PATH },
+        { path: allowlistPath },
         'Mount allowlist not found - additional mounts will be BLOCKED. ' +
           'Create the file to enable additional mounts.',
       );
       return null;
     }
 
-    const content = fs.readFileSync(MOUNT_ALLOWLIST_PATH, 'utf-8');
+    const content = fs.readFileSync(allowlistPath, 'utf-8');
     const allowlist = JSON.parse(content) as MountAllowlist;
 
     // Validate structure
@@ -94,23 +82,22 @@ export function loadMountAllowlist(): MountAllowlist | null {
     ];
     allowlist.blockedPatterns = mergedBlockedPatterns;
 
-    cachedAllowlist = allowlist;
     logger.info(
       {
-        path: MOUNT_ALLOWLIST_PATH,
+        path: allowlistPath,
         allowedRoots: allowlist.allowedRoots.length,
         blockedPatterns: allowlist.blockedPatterns.length,
       },
       'Mount allowlist loaded successfully',
     );
 
-    return cachedAllowlist;
+    return allowlist;
   } catch (err) {
-    allowlistLoadError = err instanceof Error ? err.message : String(err);
+    const errorMessage = err instanceof Error ? err.message : String(err);
     logger.error(
       {
-        path: MOUNT_ALLOWLIST_PATH,
-        error: allowlistLoadError,
+        path: allowlistPath,
+        error: errorMessage,
       },
       'Failed to load mount allowlist - additional mounts will be BLOCKED',
     );
@@ -233,14 +220,15 @@ export interface MountValidationResult {
 export function validateMount(
   mount: AdditionalMount,
   isMain: boolean,
+  allowlistPath = MOUNT_ALLOWLIST_PATH,
 ): MountValidationResult {
-  const allowlist = loadMountAllowlist();
+  const allowlist = loadMountAllowlist(allowlistPath);
 
   // If no allowlist, block all additional mounts
   if (allowlist === null) {
     return {
       allowed: false,
-      reason: `No mount allowlist configured at ${MOUNT_ALLOWLIST_PATH}`,
+      reason: `No mount allowlist configured at ${allowlistPath}`,
     };
   }
 
@@ -337,6 +325,7 @@ export function validateAdditionalMounts(
   mounts: AdditionalMount[],
   groupName: string,
   isMain: boolean,
+  allowlistPath = MOUNT_ALLOWLIST_PATH,
 ): Array<{
   hostPath: string;
   containerPath: string;
@@ -349,12 +338,14 @@ export function validateAdditionalMounts(
   }> = [];
 
   for (const mount of mounts) {
-    const result = validateMount(mount, isMain);
+    const result = validateMount(mount, isMain, allowlistPath);
 
     if (result.allowed) {
       validatedMounts.push({
+        // biome-ignore lint/style/noNonNullAssertion: set when result.allowed is true
         hostPath: result.realHostPath!,
         containerPath: `/workspace/extra/${result.resolvedContainerPath}`,
+        // biome-ignore lint/style/noNonNullAssertion: set when result.allowed is true
         readonly: result.effectiveReadonly!,
       });
 

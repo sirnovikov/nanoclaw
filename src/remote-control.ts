@@ -1,6 +1,6 @@
-import { spawn } from 'child_process';
-import fs from 'fs';
-import path from 'path';
+import { spawn } from 'node:child_process';
+import fs from 'node:fs';
+import path from 'node:path';
 
 import { DATA_DIR } from './config.js';
 import { logger } from './logger.js';
@@ -196,9 +196,11 @@ export async function startRemoteControl(
   });
 }
 
-export function stopRemoteControl(): {
-  ok: true;
-} | { ok: false; error: string } {
+export function stopRemoteControl():
+  | {
+      ok: true;
+    }
+  | { ok: false; error: string } {
   if (!activeSession) {
     return { ok: false, error: 'No active Remote Control session' };
   }

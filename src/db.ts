@@ -1,16 +1,29 @@
+import fs from 'node:fs';
+import path from 'node:path';
 import Database from 'better-sqlite3';
-import fs from 'fs';
-import path from 'path';
 
 import { ASSISTANT_NAME, DATA_DIR, STORE_DIR } from './config.js';
 import { isValidGroupFolder } from './group-folder.js';
 import { logger } from './logger.js';
-import {
+import type {
   NewMessage,
   RegisteredGroup,
   ScheduledTask,
   TaskRunLog,
 } from './types.js';
+
+export interface PermissionRule {
+  id: string;
+  egress_type: 'http' | 'connect' | 'mcp';
+  pattern: string;
+  effect: 'allow' | 'deny';
+  scope: 'global' | 'group';
+  group_folder: string | null;
+  description: string;
+  source: string;
+  created_at: string;
+  match_count: number;
+}
 
 let db: Database.Database;
 
@@ -82,6 +95,32 @@ function createSchema(database: Database.Database): void {
       container_config TEXT,
       requires_trigger INTEGER DEFAULT 1
     );
+
+    CREATE TABLE IF NOT EXISTS permission_rules (
+      id            TEXT PRIMARY KEY,
+      egress_type   TEXT NOT NULL,
+      pattern       TEXT NOT NULL,
+      effect        TEXT NOT NULL,
+      scope         TEXT NOT NULL,
+      group_folder  TEXT,
+      description   TEXT NOT NULL,
+      source        TEXT NOT NULL DEFAULT 'user',
+      created_at    TEXT NOT NULL,
+      match_count   INTEGER NOT NULL DEFAULT 0
+    );
+    CREATE INDEX IF NOT EXISTS idx_permission_rules_lookup
+      ON permission_rules(egress_type, scope, group_folder, effect);
+
+    CREATE TABLE IF NOT EXISTS permission_audit_log (
+      id            INTEGER PRIMARY KEY AUTOINCREMENT,
+      egress_type   TEXT NOT NULL,
+      subject       TEXT NOT NULL,
+      decision      TEXT NOT NULL,
+      group_folder  TEXT NOT NULL,
+      created_at    TEXT NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS idx_permission_audit_group
+      ON permission_audit_log(group_folder, created_at DESC);
   `);
 
   // Add context_mode column if it doesn't exist (migration for existing DBs)
@@ -632,6 +671,136 @@ export function getAllRegisteredGroups(): Record<string, RegisteredGroup> {
     };
   }
   return result;
+}
+
+// --- Permission rule accessors ---
+
+export function insertPermissionRule(rule: {
+  id: string;
+  egress_type: 'http' | 'connect' | 'mcp';
+  pattern: string;
+  effect: 'allow' | 'deny';
+  scope: 'global' | 'group';
+  group_folder: string | null;
+  description: string;
+  source?: string;
+  created_at: string;
+}): void {
+  // Detect exact duplicate: same egress_type, pattern, scope, group_folder, effect.
+  // If one exists, increment its match_count instead of inserting a new row.
+  const existing = db
+    .prepare(
+      `SELECT id FROM permission_rules
+       WHERE egress_type = ? AND pattern = ? AND scope = ?
+         AND effect = ?
+         AND (group_folder IS ? OR group_folder = ?)`,
+    )
+    .get(
+      rule.egress_type,
+      rule.pattern,
+      rule.scope,
+      rule.effect,
+      rule.group_folder,
+      rule.group_folder,
+    ) as { id: string } | undefined;
+
+  if (existing) {
+    db.prepare(
+      `UPDATE permission_rules SET match_count = match_count + 1 WHERE id = ?`,
+    ).run(existing.id);
+    return;
+  }
+
+  db.prepare(
+    `INSERT INTO permission_rules
+       (id, egress_type, pattern, effect, scope, group_folder, description, source, created_at, match_count)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 0)`,
+  ).run(
+    rule.id,
+    rule.egress_type,
+    rule.pattern,
+    rule.effect,
+    rule.scope,
+    rule.group_folder,
+    rule.description,
+    rule.source ?? 'user',
+    rule.created_at,
+  );
+}
+
+export function getPermissionRules(filters?: {
+  egress_type?: string;
+  scope?: string;
+  group_folder?: string;
+}): PermissionRule[] {
+  const conditions: string[] = [];
+  const values: unknown[] = [];
+
+  if (filters?.egress_type !== undefined) {
+    conditions.push('egress_type = ?');
+    values.push(filters.egress_type);
+  }
+  if (filters?.scope !== undefined) {
+    conditions.push('scope = ?');
+    values.push(filters.scope);
+  }
+  if (filters?.group_folder !== undefined) {
+    conditions.push('(group_folder IS ? OR group_folder = ?)');
+    values.push(filters.group_folder, filters.group_folder);
+  }
+
+  const where =
+    conditions.length > 0 ? `WHERE ${conditions.join(' AND ')}` : '';
+  return db
+    .prepare(`SELECT * FROM permission_rules ${where} ORDER BY created_at`)
+    .all(...values) as PermissionRule[];
+}
+
+export function incrementRuleMatchCount(id: string): void {
+  db.prepare(
+    `UPDATE permission_rules SET match_count = match_count + 1 WHERE id = ?`,
+  ).run(id);
+}
+
+export interface PermissionAuditEntry {
+  egress_type: string;
+  subject: string;
+  decision: string;
+  group_folder: string;
+  created_at: string;
+}
+
+export function logPermissionDecision(entry: {
+  egress_type: string;
+  subject: string;
+  decision: string;
+  group_folder: string;
+}): void {
+  db.prepare(
+    `INSERT INTO permission_audit_log (egress_type, subject, decision, group_folder, created_at)
+     VALUES (?, ?, ?, ?, ?)`,
+  ).run(
+    entry.egress_type,
+    entry.subject,
+    entry.decision,
+    entry.group_folder,
+    new Date().toISOString(),
+  );
+}
+
+export function getRecentPermissionDecisions(
+  groupFolder: string,
+  limit = 20,
+): PermissionAuditEntry[] {
+  return db
+    .prepare(
+      `SELECT egress_type, subject, decision, group_folder, created_at
+       FROM permission_audit_log
+       WHERE group_folder = ?
+       ORDER BY created_at DESC
+       LIMIT ?`,
+    )
+    .all(groupFolder, limit) as PermissionAuditEntry[];
 }
 
 // --- JSON migration ---

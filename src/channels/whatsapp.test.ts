@@ -1,5 +1,5 @@
-import { describe, it, expect, beforeEach, vi, afterEach } from 'vitest';
-import { EventEmitter } from 'events';
+import { EventEmitter } from 'node:events';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 // --- Mocks ---
 
@@ -109,8 +109,8 @@ vi.mock('@whiskeysockets/baileys', () => {
   };
 });
 
-import { WhatsAppChannel, WhatsAppChannelOpts } from './whatsapp.js';
-import { getLastGroupSync, updateChatName, setLastGroupSync } from '../db.js';
+import { getLastGroupSync, setLastGroupSync, updateChatName } from '../db.js';
+import { WhatsAppChannel, type WhatsAppChannelOpts } from './whatsapp.js';
 
 // --- Test helpers ---
 
@@ -233,15 +233,18 @@ describe('WhatsAppChannel', () => {
 
       await connectChannel(channel);
 
-      // Disconnect
+      // Disconnect — force private field for test purposes
+      // biome-ignore lint/suspicious/noExplicitAny: accessing private field in test
       (channel as any).connected = false;
 
       // Queue a message while disconnected
       await channel.sendMessage('test@g.us', 'Queued message');
       expect(fakeSocket.sendMessage).not.toHaveBeenCalled();
 
-      // Reconnect
+      // Reconnect — force private fields for test purposes
+      // biome-ignore lint/suspicious/noExplicitAny: accessing private fields in test
       (channel as any).connected = true;
+      // biome-ignore lint/suspicious/noExplicitAny: calling private method in test
       await (channel as any).flushOutgoingQueue();
 
       // Group messages get prefixed when flushed

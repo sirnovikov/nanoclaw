@@ -1,7 +1,7 @@
-import {
+import type {
   Channel,
-  OnInboundMessage,
   OnChatMetadata,
+  OnInboundMessage,
   RegisteredGroup,
 } from '../types.js';
 
@@ -9,6 +9,11 @@ export interface ChannelOpts {
   onMessage: OnInboundMessage;
   onChatMetadata: OnChatMetadata;
   registeredGroups: () => Record<string, RegisteredGroup>;
+  onPermissionResponse?: (
+    groupFolder: string,
+    requestId: string,
+    decision: 'once' | 'always' | 'deny',
+  ) => void;
 }
 
 export type ChannelFactory = (opts: ChannelOpts) => Channel | null;

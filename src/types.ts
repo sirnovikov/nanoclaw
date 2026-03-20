@@ -90,6 +90,23 @@ export interface Channel {
   setTyping?(jid: string, isTyping: boolean): Promise<void>;
   // Optional: sync group/chat names from the platform.
   syncGroups?(force: boolean): Promise<void>;
+  // Optional: send a permission approval request with inline buttons.
+  // Returns the Telegram message_id so it can be tracked for restart cleanup (null on failure).
+  sendPermissionRequest?(
+    jid: string,
+    requestId: string,
+    egressType: string, // 'http' | 'connect' | 'mcp'
+    subject: string, // URL, hostname:port, or tool name
+    groupFolder: string,
+    proposal: {
+      name: string;
+      patterns: string[];
+      effect: string;
+      scope: string;
+      description: string;
+    } | null,
+    toolInput?: unknown, // MCP tool arguments for display
+  ): Promise<number | null>;
 }
 
 // Callback type that channels use to deliver inbound messages

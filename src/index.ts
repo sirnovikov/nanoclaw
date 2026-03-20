@@ -1,5 +1,5 @@
-import fs from 'fs';
-import path from 'path';
+import fs from 'node:fs';
+import path from 'node:path';
 
 import {
   ASSISTANT_NAME,
@@ -9,14 +9,19 @@ import {
   TIMEZONE,
   TRIGGER_PATTERN,
 } from './config.js';
-import { startCredentialProxy } from './credential-proxy.js';
+import {
+  handleProxyPermissionResponse,
+  loadPendingProxyMessages,
+  startCredentialProxy,
+} from './credential-proxy.js';
 import './channels/index.js';
 import {
   getChannelFactory,
   getRegisteredChannelNames,
 } from './channels/registry.js';
+import { resolveContainerGroup } from './container-group-registry.js';
 import {
-  ContainerOutput,
+  type ContainerOutput,
   runContainerAgent,
   writeGroupsSnapshot,
   writeTasksSnapshot,
@@ -33,7 +38,7 @@ import {
   getAllTasks,
   getMessagesSince,
   getNewMessages,
-  getRegisteredGroup,
+  getRecentPermissionDecisions,
   getRouterState,
   initDatabase,
   setRegisteredGroup,
@@ -42,9 +47,10 @@ import {
   storeChatMetadata,
   storeMessage,
 } from './db.js';
-import { GroupQueue } from './group-queue.js';
 import { resolveGroupFolderPath } from './group-folder.js';
+import { GroupQueue } from './group-queue.js';
 import { startIpcWatcher } from './ipc.js';
+import { logger } from './logger.js';
 import { findChannel, formatMessages, formatOutbound } from './router.js';
 import {
   restoreRemoteControl,
@@ -58,8 +64,7 @@ import {
   shouldDropMessage,
 } from './sender-allowlist.js';
 import { startSchedulerLoop } from './task-scheduler.js';
-import { Channel, NewMessage, RegisteredGroup } from './types.js';
-import { logger } from './logger.js';
+import type { Channel, NewMessage, RegisteredGroup } from './types.js';
 
 // Re-export for backwards compatibility during refactor
 export { escapeXml, formatMessages } from './router.js';
@@ -185,8 +190,8 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
   // Advance cursor so the piping path in startMessageLoop won't re-fetch
   // these messages. Save the old cursor so we can roll back on error.
   const previousCursor = lastAgentTimestamp[chatJid] || '';
-  lastAgentTimestamp[chatJid] =
-    missedMessages[missedMessages.length - 1].timestamp;
+  const lastMissed = missedMessages[missedMessages.length - 1];
+  lastAgentTimestamp[chatJid] = lastMissed?.timestamp ?? previousCursor;
   saveState();
 
   logger.info(
@@ -324,6 +329,22 @@ async function runAgent(
       (proc, containerName) =>
         queue.registerProcess(chatJid, proc, containerName, group.folder),
       wrappedOnOutput,
+      {
+        sendPermissionRequest: async (req) => {
+          const channel = findChannel(channels, req.chatJid);
+          if (!channel?.sendPermissionRequest) return null;
+          return channel.sendPermissionRequest(
+            req.chatJid,
+            req.requestId,
+            req.egressType,
+            req.subject,
+            req.groupFolder,
+            req.proposal,
+            req.toolInput,
+          );
+        },
+        getDecisionHistory: () => getRecentPermissionDecisions(group.folder),
+      },
     );
 
     if (output.newSessionId) {
@@ -425,8 +446,9 @@ async function startMessageLoop(): Promise<void> {
               { chatJid, count: messagesToSend.length },
               'Piped messages to active container',
             );
+            const lastToSend = messagesToSend[messagesToSend.length - 1];
             lastAgentTimestamp[chatJid] =
-              messagesToSend[messagesToSend.length - 1].timestamp;
+              lastToSend?.timestamp ?? lastAgentTimestamp[chatJid] ?? '';
             saveState();
             // Show typing indicator while the container processes the piped message
             channel
@@ -473,14 +495,49 @@ function ensureContainerSystemRunning(): void {
 async function main(): Promise<void> {
   ensureContainerSystemRunning();
   initDatabase();
+
+  // Ensure Docker proxy network exists for permission-approval containers
+  const { execSync } = await import('node:child_process');
+  try {
+    execSync('./scripts/setup-proxy-network.sh', { stdio: 'pipe' });
+  } catch (err) {
+    logger.warn(
+      { err },
+      'Failed to create nanoclaw-proxy Docker network — permission approval may not work',
+    );
+  }
   logger.info('Database initialized');
   loadState();
   restoreRemoteControl();
 
-  // Start credential proxy (containers route API calls through this)
+  // Start credential proxy (containers route API calls through this).
+  // Approval callbacks are wired after channel connect so sendPermissionRequest is available.
+  // resolveGroup looks up the container's bridge IP to find the originating group.
   const proxyServer = await startCredentialProxy(
     CREDENTIAL_PROXY_PORT,
     PROXY_BIND_HOST,
+    {
+      resolveGroup: (addr) => resolveContainerGroup(addr),
+      sendPermissionRequest: async (req) => {
+        const channel = findChannel(channels, req.chatJid);
+        if (!channel?.sendPermissionRequest) return null;
+        return channel.sendPermissionRequest(
+          req.chatJid,
+          req.requestId,
+          req.egressType,
+          req.subject,
+          req.groupFolder,
+          req.proposal,
+          req.toolInput,
+        );
+      },
+      onPermissionResponse: () => {
+        // Rule persistence is handled inside handleProxyPermissionResponse
+        // which is called from channelOpts.onPermissionResponse above.
+      },
+      getDecisionHistory: (groupFolder) =>
+        getRecentPermissionDecisions(groupFolder),
+    },
   );
 
   // Graceful shutdown handlers
@@ -574,12 +631,21 @@ async function main(): Promise<void> {
       isGroup?: boolean,
     ) => storeChatMetadata(chatJid, timestamp, name, channel, isGroup),
     registeredGroups: () => registeredGroups,
+    onPermissionResponse: (
+      _groupFolder: string,
+      requestId: string,
+      decision: 'once' | 'always' | 'deny',
+    ) => {
+      // Proxy HTTP/HTTPS permission (no-op if requestId not in pending map)
+      handleProxyPermissionResponse(requestId, decision);
+    },
   };
 
   // Create and connect all registered channels.
   // Each channel self-registers via the barrel import above.
   // Factories return null when credentials are missing, so unconfigured channels are skipped.
   for (const channelName of getRegisteredChannelNames()) {
+    // biome-ignore lint/style/noNonNullAssertion: iterating names from getRegisteredChannelNames() guarantees factory exists
     const factory = getChannelFactory(channelName)!;
     const channel = factory(channelOpts);
     if (!channel) {
@@ -595,6 +661,28 @@ async function main(): Promise<void> {
   if (channels.length === 0) {
     logger.fatal('No channels connected');
     process.exit(1);
+  }
+
+  // On startup, remove inline keyboards from any Telegram messages that were
+  // waiting for permission approval before the previous restart.
+  const staleMessages = loadPendingProxyMessages();
+  if (staleMessages.length > 0) {
+    logger.info(
+      { count: staleMessages.length },
+      'Clearing stale permission request keyboards',
+    );
+    for (const entry of staleMessages) {
+      const ch = findChannel(channels, entry.chatJid);
+      if (ch) {
+        try {
+          await (
+            ch as import('./channels/telegram.js').TelegramChannel
+          ).clearPermissionKeyboard(entry.chatJid, entry.messageId);
+        } catch {
+          /* non-critical */
+        }
+      }
+    }
   }
 
   // Start subsystems (independently of connection handler)
@@ -613,6 +701,19 @@ async function main(): Promise<void> {
       const text = formatOutbound(rawText);
       if (text) await channel.sendMessage(jid, text);
     },
+    sendPermissionRequest: async (req) => {
+      const channel = findChannel(channels, req.chatJid);
+      if (!channel?.sendPermissionRequest) return null;
+      return channel.sendPermissionRequest(
+        req.chatJid,
+        req.requestId,
+        req.egressType,
+        req.subject,
+        req.groupFolder,
+        req.proposal,
+        req.toolInput,
+      );
+    },
   });
   startIpcWatcher({
     sendMessage: (jid, text) => {
@@ -626,7 +727,7 @@ async function main(): Promise<void> {
       await Promise.all(
         channels
           .filter((ch) => ch.syncGroups)
-          .map((ch) => ch.syncGroups!(force)),
+          .map((ch) => ch.syncGroups?.(force)),
       );
     },
     getAvailableGroups,

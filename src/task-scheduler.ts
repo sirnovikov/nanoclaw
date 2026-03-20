@@ -1,13 +1,15 @@
-import { ChildProcess } from 'child_process';
+import type { ChildProcess } from 'node:child_process';
+import fs from 'node:fs';
 import { CronExpressionParser } from 'cron-parser';
-import fs from 'fs';
 
 import { ASSISTANT_NAME, SCHEDULER_POLL_INTERVAL, TIMEZONE } from './config.js';
 import {
-  ContainerOutput,
+  type BridgePermissionDeps,
+  type ContainerOutput,
   runContainerAgent,
   writeTasksSnapshot,
 } from './container-runner.js';
+import type { PermissionRequest } from './credential-proxy.js';
 import {
   getAllTasks,
   getDueTasks,
@@ -16,10 +18,10 @@ import {
   updateTask,
   updateTaskAfterRun,
 } from './db.js';
-import { GroupQueue } from './group-queue.js';
 import { resolveGroupFolderPath } from './group-folder.js';
+import type { GroupQueue } from './group-queue.js';
 import { logger } from './logger.js';
-import { RegisteredGroup, ScheduledTask } from './types.js';
+import type { RegisteredGroup, ScheduledTask } from './types.js';
 
 /**
  * Compute the next run time for a recurring task, anchored to the
@@ -52,6 +54,7 @@ export function computeNextRun(task: ScheduledTask): string | null {
     }
     // Anchor to the scheduled time, not now, to prevent drift.
     // Skip past any missed intervals so we always land in the future.
+    // biome-ignore lint/style/noNonNullAssertion: only called when task.next_run is set
     let next = new Date(task.next_run!).getTime() + ms;
     while (next <= now) {
       next += ms;
@@ -73,6 +76,8 @@ export interface SchedulerDependencies {
     groupFolder: string,
   ) => void;
   sendMessage: (jid: string, text: string) => Promise<void>;
+  /** Optional: bridge permission deps for MCP tool gating in scheduled tasks. */
+  sendPermissionRequest?: (req: PermissionRequest) => Promise<number | null>;
 }
 
 async function runTask(
@@ -169,6 +174,14 @@ async function runTask(
   };
 
   try {
+    const bridgeDeps: BridgePermissionDeps | undefined =
+      deps.sendPermissionRequest
+        ? {
+            sendPermissionRequest: deps.sendPermissionRequest,
+            getDecisionHistory: () => [],
+          }
+        : undefined;
+
     const output = await runContainerAgent(
       group,
       {
@@ -197,6 +210,7 @@ async function runTask(
           error = streamedOutput.error || 'Unknown error';
         }
       },
+      bridgeDeps,
     );
 
     if (closeTimer) clearTimeout(closeTimer);

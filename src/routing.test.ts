@@ -1,7 +1,7 @@
-import { describe, it, expect, beforeEach } from 'vitest';
+import { beforeEach, describe, expect, it } from 'vitest';
 
-import { _initTestDatabase, getAllChats, storeChatMetadata } from './db.js';
-import { getAvailableGroups, _setRegisteredGroups } from './index.js';
+import { _initTestDatabase, storeChatMetadata } from './db.js';
+import { _setRegisteredGroups, getAvailableGroups } from './index.js';
 
 beforeEach(() => {
   _initTestDatabase();
@@ -69,7 +69,7 @@ describe('getAvailableGroups', () => {
 
     const groups = getAvailableGroups();
     expect(groups).toHaveLength(1);
-    expect(groups[0].jid).toBe('group@g.us');
+    expect(groups[0]?.jid).toBe('group@g.us');
   });
 
   it('marks registered groups correctly', () => {
@@ -129,9 +129,9 @@ describe('getAvailableGroups', () => {
     );
 
     const groups = getAvailableGroups();
-    expect(groups[0].jid).toBe('new@g.us');
-    expect(groups[1].jid).toBe('mid@g.us');
-    expect(groups[2].jid).toBe('old@g.us');
+    expect(groups[0]?.jid).toBe('new@g.us');
+    expect(groups[1]?.jid).toBe('mid@g.us');
+    expect(groups[2]?.jid).toBe('old@g.us');
   });
 
   it('excludes non-group chats regardless of JID format', () => {
@@ -160,7 +160,7 @@ describe('getAvailableGroups', () => {
 
     const groups = getAvailableGroups();
     expect(groups).toHaveLength(1);
-    expect(groups[0].jid).toBe('group@g.us');
+    expect(groups[0]?.jid).toBe('group@g.us');
   });
 
   it('returns empty array when no chats exist', () => {
