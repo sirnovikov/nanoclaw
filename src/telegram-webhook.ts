@@ -7,7 +7,11 @@
  *   *              — returns 404
  */
 
-import { createServer, type IncomingMessage, type ServerResponse } from 'node:http';
+import {
+  createServer,
+  type IncomingMessage,
+  type ServerResponse,
+} from 'node:http';
 
 import { logger } from './logger.js';
 
@@ -62,8 +66,12 @@ export function startWebhookServer(
 
       const stop = (): Promise<void> =>
         new Promise((res, rej) => {
+          server.closeAllConnections();
           server.close((err) => {
-            if (err !== undefined && (err as NodeJS.ErrnoException).code !== 'ERR_SERVER_NOT_RUNNING') {
+            if (
+              err !== undefined &&
+              (err as NodeJS.ErrnoException).code !== 'ERR_SERVER_NOT_RUNNING'
+            ) {
               rej(err);
             } else {
               res();

@@ -118,6 +118,10 @@ export class TelegramChannel implements Channel {
   }
 
   async connect(): Promise<void> {
+    if (this.bot) {
+      throw new Error('TelegramChannel.connect() called while already connected');
+    }
+
     this.bot = new Bot(this.botToken, {
       client: {
         baseFetchConfig: { agent: https.globalAgent, compress: true },

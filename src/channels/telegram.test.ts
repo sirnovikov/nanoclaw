@@ -1085,5 +1085,79 @@ describe('TelegramChannel', () => {
       await channel.disconnect();
       vi.useRealTimers();
     });
+
+    it('health monitor logs webhook errors', async () => {
+      const { logger } = await import('../logger.js');
+      vi.useFakeTimers();
+      const opts = createTestOpts();
+      const channel = new TelegramChannel('test-token', opts);
+      await channel.connect();
+
+      const bot = currentBot();
+      bot.api.getWebhookInfo.mockResolvedValueOnce({
+        url: 'https://example.com/webhook',
+        pending_update_count: 5,
+        last_error_date: 1704067200,
+        last_error_message: 'Connection timeout',
+      });
+
+      await vi.advanceTimersByTimeAsync(5 * 60 * 1000);
+
+      expect(logger.warn).toHaveBeenCalledWith(
+        expect.objectContaining({
+          lastError: 'Connection timeout',
+          pendingUpdates: 5,
+        }),
+        'Telegram webhook has errors',
+      );
+
+      await channel.disconnect();
+      vi.useRealTimers();
+    });
+
+    it('disconnect() stops server before deleting webhook', async () => {
+      const { startWebhookServer } = await import('../telegram-webhook.js');
+      const opts = createTestOpts();
+      const channel = new TelegramChannel('test-token', opts);
+      await channel.connect();
+
+      const callOrder: string[] = [];
+      const serverResult = await (
+        startWebhookServer as ReturnType<typeof vi.fn>
+      ).mock.results[0]?.value;
+      serverResult.stop.mockImplementation(() => {
+        callOrder.push('server.stop');
+        return Promise.resolve();
+      });
+      const bot = currentBot();
+      bot.api.deleteWebhook.mockImplementation(() => {
+        callOrder.push('deleteWebhook');
+        return Promise.resolve(true);
+      });
+
+      await channel.disconnect();
+
+      expect(callOrder).toEqual(['server.stop', 'deleteWebhook']);
+    });
+
+    it('connect() throws if already connected', async () => {
+      const opts = createTestOpts();
+      const channel = new TelegramChannel('test-token', opts);
+      await channel.connect();
+
+      await expect(channel.connect()).rejects.toThrow(
+        'already connected',
+      );
+
+      await channel.disconnect();
+    });
+
+    it('disconnect() is safe when not connected', async () => {
+      const opts = createTestOpts();
+      const channel = new TelegramChannel('test-token', opts);
+
+      // Should not throw
+      await expect(channel.disconnect()).resolves.toBeUndefined();
+    });
   });
 });
