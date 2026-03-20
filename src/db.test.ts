@@ -510,9 +510,24 @@ describe('permission audit log', () => {
   });
 
   it('getRecentPermissionDecisions returns results in reverse chronological order', () => {
-    logPermissionDecision({ egress_type: 'http', subject: 'https://alpha.com', decision: 'allow', group_folder: 'telegram_main' });
-    logPermissionDecision({ egress_type: 'http', subject: 'https://beta.com', decision: 'deny', group_folder: 'telegram_main' });
-    logPermissionDecision({ egress_type: 'connect', subject: 'gamma.com:443', decision: 'allow', group_folder: 'telegram_main' });
+    logPermissionDecision({
+      egress_type: 'http',
+      subject: 'https://alpha.com',
+      decision: 'allow',
+      group_folder: 'telegram_main',
+    });
+    logPermissionDecision({
+      egress_type: 'http',
+      subject: 'https://beta.com',
+      decision: 'deny',
+      group_folder: 'telegram_main',
+    });
+    logPermissionDecision({
+      egress_type: 'connect',
+      subject: 'gamma.com:443',
+      decision: 'allow',
+      group_folder: 'telegram_main',
+    });
 
     const entries = getRecentPermissionDecisions('telegram_main');
     expect(entries).toHaveLength(3);
@@ -523,7 +538,9 @@ describe('permission audit log', () => {
     expect(subjects).toContain('gamma.com:443');
     // created_at is non-ascending (DESC order is maintained)
     for (let i = 0; i < entries.length - 1; i++) {
-      expect((entries[i]?.created_at ?? '') >= (entries[i + 1]?.created_at ?? '')).toBe(true);
+      expect(
+        (entries[i]?.created_at ?? '') >= (entries[i + 1]?.created_at ?? ''),
+      ).toBe(true);
     }
   });
 

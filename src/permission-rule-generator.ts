@@ -59,7 +59,7 @@ const PROPOSAL_TOOL: Anthropic.Tool = {
         type: 'string',
         enum: ['allow', 'deny'],
         description:
-          'Whether to allow or deny matching requests. Infer from the user\'s decision history.',
+          "Whether to allow or deny matching requests. Infer from the user's decision history.",
       },
       scope: {
         type: 'string',
@@ -150,7 +150,11 @@ export function validateProposal(
   const obj = raw as Record<string, unknown>;
   const { name, patterns, effect, scope, description } = obj;
 
-  if (typeof name !== 'string' || typeof scope !== 'string' || typeof description !== 'string') {
+  if (
+    typeof name !== 'string' ||
+    typeof scope !== 'string' ||
+    typeof description !== 'string'
+  ) {
     return null;
   }
   if (typeof effect !== 'string' || (effect !== 'allow' && effect !== 'deny')) {
@@ -233,10 +237,18 @@ export async function generateRuleProposal(
 
   const proposal = validateProposal(toolBlock.input, egressType);
   if (!proposal) {
-    logger.warn({ egressType, subject, input: toolBlock.input }, 'Haiku proposal failed validation');
+    logger.warn(
+      { egressType, subject, input: toolBlock.input },
+      'Haiku proposal failed validation',
+    );
   } else {
     logger.info(
-      { egressType, name: proposal.name, effect: proposal.effect, patterns: proposal.patterns },
+      {
+        egressType,
+        name: proposal.name,
+        effect: proposal.effect,
+        patterns: proposal.patterns,
+      },
       'Haiku rule proposal generated',
     );
   }

@@ -151,7 +151,12 @@ export function createMcpBridge(
 
     // Generate Haiku rule proposal eagerly (before sending Telegram message)
     const history = deps.getDecisionHistory();
-    const proposal = await generateRuleProposal('mcp', subject, toolsList, history);
+    const proposal = await generateRuleProposal(
+      'mcp',
+      subject,
+      toolsList,
+      history,
+    );
 
     const decisionPromise = new Promise<'allow' | 'deny'>((resolve) => {
       const timeout = setTimeout(() => {
@@ -221,7 +226,13 @@ export function createMcpBridge(
           res.on('end', () => {
             const responseBody = Buffer.concat(chunks).toString();
             logger.debug(
-              { name: config.name, method: request.method, statusCode: res.statusCode, bodyLen: responseBody.length, bodySnippet: responseBody.slice(0, 300) },
+              {
+                name: config.name,
+                method: request.method,
+                statusCode: res.statusCode,
+                bodyLen: responseBody.length,
+                bodySnippet: responseBody.slice(0, 300),
+              },
               'Bridge: upstream response received',
             );
             const parsed = parseUpstreamBody(responseBody);
@@ -232,7 +243,11 @@ export function createMcpBridge(
               resolve(null);
             } else {
               logger.warn(
-                { name: config.name, method: request.method, body: responseBody.slice(0, 500) },
+                {
+                  name: config.name,
+                  method: request.method,
+                  body: responseBody.slice(0, 500),
+                },
                 'Bridge: failed to parse upstream response',
               );
               resolve({

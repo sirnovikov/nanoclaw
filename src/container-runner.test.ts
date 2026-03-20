@@ -679,7 +679,10 @@ describe('MCP bridge setup', () => {
         }),
       );
 
-      const bridgeDeps = { sendPermissionRequest: vi.fn(), getDecisionHistory: vi.fn().mockReturnValue([]) };
+      const bridgeDeps = {
+        sendPermissionRequest: vi.fn(),
+        getDecisionHistory: vi.fn().mockReturnValue([]),
+      };
       const resultPromise = runContainerAgent(
         testGroup,
         testInput,
@@ -714,7 +717,10 @@ describe('MCP bridge setup', () => {
         }),
       );
 
-      const bridgeDeps = { sendPermissionRequest: vi.fn(), getDecisionHistory: vi.fn().mockReturnValue([]) };
+      const bridgeDeps = {
+        sendPermissionRequest: vi.fn(),
+        getDecisionHistory: vi.fn().mockReturnValue([]),
+      };
       const resultPromise = runContainerAgent(
         testGroup,
         testInput,

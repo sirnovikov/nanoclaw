@@ -98,7 +98,13 @@ export interface Channel {
     egressType: string, // 'http' | 'connect' | 'mcp'
     subject: string, // URL, hostname:port, or tool name
     groupFolder: string,
-    proposal: { name: string; patterns: string[]; effect: string; scope: string; description: string } | null,
+    proposal: {
+      name: string;
+      patterns: string[];
+      effect: string;
+      scope: string;
+      description: string;
+    } | null,
     toolInput?: unknown, // MCP tool arguments for display
   ): Promise<number | null>;
 }

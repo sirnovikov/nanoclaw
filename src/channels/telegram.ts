@@ -176,7 +176,9 @@ export class TelegramChannel implements Channel {
     this.bot.on('callback_query:data', async (ctx) => {
       const data = ctx.callbackQuery.data;
       // Format: once_<reqId> | always_<reqId> | deny_<reqId>
-      const match = data.match(/^(once|always-allow|always-deny|always|deny)_(.+)$/);
+      const match = data.match(
+        /^(once|always-allow|always-deny|always|deny)_(.+)$/,
+      );
       if (!match) return;
 
       const [, action, requestId] = match;
@@ -192,7 +194,9 @@ export class TelegramChannel implements Channel {
 
       // Map action to decision (always-allow/always-deny both map to 'always')
       const decision: 'once' | 'always' | 'deny' =
-        action === 'always-allow' || action === 'always-deny' || action === 'always'
+        action === 'always-allow' ||
+        action === 'always-deny' ||
+        action === 'always'
           ? 'always'
           : (action as 'once' | 'deny');
       this.opts.onPermissionResponse?.(group.folder, requestId, decision);

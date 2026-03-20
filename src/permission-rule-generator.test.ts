@@ -285,7 +285,13 @@ describe('validateProposal', () => {
   it('rejects empty string fields', () => {
     expect(
       validateProposal(
-        { name: '', patterns: ['https://x.com/*'], effect: 'allow', scope: 'global', description: 'desc' },
+        {
+          name: '',
+          patterns: ['https://x.com/*'],
+          effect: 'allow',
+          scope: 'global',
+          description: 'desc',
+        },
         'http',
       ),
     ).toBeNull();
@@ -294,7 +300,13 @@ describe('validateProposal', () => {
   it('rejects pattern > 200 chars', () => {
     expect(
       validateProposal(
-        { name: 'Long', patterns: ['x'.repeat(201)], effect: 'allow', scope: 'global', description: 'desc' },
+        {
+          name: 'Long',
+          patterns: ['x'.repeat(201)],
+          effect: 'allow',
+          scope: 'global',
+          description: 'desc',
+        },
         'http',
       ),
     ).toBeNull();
@@ -325,7 +337,10 @@ describe('generateRuleProposal (mocked)', () => {
     const callArgs = getMockCreate().mock.calls[0]?.[0];
     expect(callArgs.tools).toHaveLength(1);
     expect(callArgs.tools[0].name).toBe('propose_rule');
-    expect(callArgs.tool_choice).toEqual({ type: 'tool', name: 'propose_rule' });
+    expect(callArgs.tool_choice).toEqual({
+      type: 'tool',
+      name: 'propose_rule',
+    });
   });
 
   it('passes HTML-escaped subject inside <request> delimiters', async () => {
@@ -384,7 +399,9 @@ describe('generateRuleProposal (mocked)', () => {
   });
 
   it('returns null for * pattern in tool input', async () => {
-    getMockCreate().mockResolvedValueOnce(makeToolUseResponse({ patterns: ['*'] }));
+    getMockCreate().mockResolvedValueOnce(
+      makeToolUseResponse({ patterns: ['*'] }),
+    );
 
     expect(
       await generateRuleProposal('http', 'https://example.com/'),

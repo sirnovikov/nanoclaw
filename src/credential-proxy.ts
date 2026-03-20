@@ -213,7 +213,12 @@ export async function checkWithApproval(
   // No matching rule — call Haiku then send Telegram
   const requestId = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
   const history = callbacks.getDecisionHistory?.(groupFolder) ?? [];
-  const proposal = await generateRuleProposal(egressType, subject, null, history);
+  const proposal = await generateRuleProposal(
+    egressType,
+    subject,
+    null,
+    history,
+  );
 
   const messageId = await callbacks.sendPermissionRequest({
     requestId,
