@@ -15,7 +15,6 @@
  *   explicit approval via Telegram. HTTP and HTTPS (CONNECT) are both handled.
  */
 
-import fs from 'node:fs';
 import {
   createServer,
   request as httpRequest,
@@ -104,7 +103,7 @@ const PENDING_PROXY_MESSAGES_FILE = path.join(
   'pending-proxy-messages.jsonl',
 );
 
-export { type PendingProxyMessage } from './pending-messages.js';
+export type { PendingProxyMessage } from './pending-messages.js';
 
 function appendPendingMessage(entry: PendingProxyMessage): void {
   appendPending(PENDING_PROXY_MESSAGES_FILE, entry);

@@ -20,7 +20,7 @@ export function appendPendingMessage(
     const trimmed = [...existing.slice(-(MAX_PENDING_MESSAGES - 1)), entry];
     fs.writeFileSync(
       filePath,
-      trimmed.map((e) => JSON.stringify(e)).join('\n') + '\n',
+      `${trimmed.map((e) => JSON.stringify(e)).join('\n')}\n`,
       'utf-8',
     );
   } catch {
