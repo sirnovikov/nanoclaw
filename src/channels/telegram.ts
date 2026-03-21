@@ -1,7 +1,20 @@
 import https from 'node:https';
-import { type Api, Bot, type Context, type Filter } from 'grammy';
+import {
+  type Api,
+  Bot,
+  type Context,
+  type Filter,
+  webhookCallback,
+} from 'grammy';
 
-import { ASSISTANT_NAME, TRIGGER_PATTERN } from '../config.js';
+import {
+  ASSISTANT_NAME,
+  TELEGRAM_WEBHOOK_PORT,
+  TELEGRAM_WEBHOOK_SECRET,
+  TELEGRAM_WEBHOOK_URL,
+  TRIGGER_PATTERN,
+} from '../config.js';
+import { startWebhookServer, type WebhookServer } from '../telegram-webhook.js';
 import { readEnvFile } from '../env.js';
 import { logger } from '../logger.js';
 import type {
@@ -56,18 +69,68 @@ export class TelegramChannel implements Channel {
   private bot: Bot | null = null;
   private opts: TelegramChannelOpts;
   private botToken: string;
+  private webhookServer: WebhookServer | null = null;
+  private healthInterval: ReturnType<typeof setInterval> | null = null;
+  private lastProcessedUpdateId = 0;
 
   constructor(botToken: string, opts: TelegramChannelOpts) {
     this.botToken = botToken;
     this.opts = opts;
   }
 
+  private registerDedupMiddleware(): void {
+    if (!this.bot) return;
+    this.bot.use(async (ctx, next) => {
+      if (ctx.update.update_id <= this.lastProcessedUpdateId) return;
+      await next();
+      this.lastProcessedUpdateId = ctx.update.update_id;
+    });
+  }
+
+  private startHealthMonitor(): void {
+    const HEALTH_INTERVAL = 5 * 60 * 1000;
+    this.healthInterval = setInterval(async () => {
+      if (!this.bot) return;
+      try {
+        const info = await this.bot.api.getWebhookInfo();
+        if (!info.url) {
+          logger.warn('Webhook dropped by Telegram, re-registering');
+          await this.bot.api.setWebhook(TELEGRAM_WEBHOOK_URL, {
+            secret_token: TELEGRAM_WEBHOOK_SECRET || undefined,
+          });
+        }
+        if (info.last_error_date) {
+          logger.warn(
+            {
+              lastError: info.last_error_message,
+              lastErrorDate: new Date(
+                info.last_error_date * 1000,
+              ).toISOString(),
+              pendingUpdates: info.pending_update_count,
+            },
+            'Telegram webhook has errors',
+          );
+        }
+      } catch (err) {
+        logger.error({ err }, 'Webhook health check failed');
+      }
+    }, HEALTH_INTERVAL);
+  }
+
   async connect(): Promise<void> {
+    if (this.bot) {
+      throw new Error(
+        'TelegramChannel.connect() called while already connected',
+      );
+    }
+
     this.bot = new Bot(this.botToken, {
       client: {
         baseFetchConfig: { agent: https.globalAgent, compress: true },
       },
     });
+
+    this.registerDedupMiddleware();
 
     // Command to get chat ID (useful for registration)
     this.bot.command('chatid', (ctx) => {
@@ -281,23 +344,39 @@ export class TelegramChannel implements Channel {
       logger.error({ err: err.message }, 'Telegram bot error');
     });
 
-    // Start polling — returns a Promise that resolves when started
-    const bot = this.bot;
-    return new Promise<void>((resolve) => {
-      bot.start({
-        onStart: (botInfo) => {
-          logger.info(
-            { username: botInfo.username, id: botInfo.id },
-            'Telegram bot connected',
-          );
-          console.log(`\n  Telegram bot: @${botInfo.username}`);
-          console.log(
-            `  Send /chatid to the bot to get a chat's registration ID\n`,
-          );
-          resolve();
-        },
-      });
+    // Fail fast if webhook config is missing
+    if (!TELEGRAM_WEBHOOK_URL) {
+      throw new Error(
+        'TELEGRAM_WEBHOOK_URL is empty — cannot register webhook',
+      );
+    }
+    if (!TELEGRAM_WEBHOOK_SECRET) {
+      throw new Error(
+        'TELEGRAM_WEBHOOK_SECRET is empty — cannot register webhook',
+      );
+    }
+
+    // Webhook mode: init bot, start HTTP server, register webhook
+    await this.bot.init();
+    logger.info(
+      { username: this.bot.botInfo.username, id: this.bot.botInfo.id },
+      'Telegram bot initialized (webhook mode)',
+    );
+
+    const handler = webhookCallback(this.bot, 'http', {
+      secretToken: TELEGRAM_WEBHOOK_SECRET || undefined,
     });
+    this.webhookServer = await startWebhookServer({
+      port: TELEGRAM_WEBHOOK_PORT,
+      handler,
+    });
+
+    await this.bot.api.setWebhook(TELEGRAM_WEBHOOK_URL, {
+      secret_token: TELEGRAM_WEBHOOK_SECRET || undefined,
+    });
+    logger.info({ url: TELEGRAM_WEBHOOK_URL }, 'Telegram webhook registered');
+
+    this.startHealthMonitor();
   }
 
   async sendMessage(jid: string, text: string): Promise<void> {
@@ -445,8 +524,20 @@ export class TelegramChannel implements Channel {
   }
 
   async disconnect(): Promise<void> {
+    if (this.healthInterval) {
+      clearInterval(this.healthInterval);
+      this.healthInterval = null;
+    }
+    if (this.webhookServer) {
+      await this.webhookServer.stop();
+      this.webhookServer = null;
+    }
     if (this.bot) {
-      this.bot.stop();
+      try {
+        await this.bot.api.deleteWebhook();
+      } catch (err) {
+        logger.error({ err }, 'Failed to delete webhook on disconnect');
+      }
       this.bot = null;
       logger.info('Telegram bot stopped');
     }
@@ -464,12 +555,33 @@ export class TelegramChannel implements Channel {
 }
 
 registerChannel('telegram', (opts: ChannelOpts) => {
-  const envVars = readEnvFile(['TELEGRAM_BOT_TOKEN']);
+  const envVars = readEnvFile([
+    'TELEGRAM_BOT_TOKEN',
+    'TELEGRAM_WEBHOOK_URL',
+    'TELEGRAM_WEBHOOK_SECRET',
+  ]);
   const token =
     process.env.TELEGRAM_BOT_TOKEN || envVars.TELEGRAM_BOT_TOKEN || '';
   if (!token) {
-    logger.warn('Telegram: TELEGRAM_BOT_TOKEN not set');
-    return null;
+    throw new Error('Telegram: TELEGRAM_BOT_TOKEN not set. Add it to .env.');
+  }
+  const webhookUrl =
+    process.env.TELEGRAM_WEBHOOK_URL || envVars.TELEGRAM_WEBHOOK_URL || '';
+  if (!webhookUrl) {
+    throw new Error(
+      'Telegram: TELEGRAM_WEBHOOK_URL not set. ' +
+        'Set TELEGRAM_WEBHOOK_URL in .env to your Cloudflare Tunnel URL (e.g. https://nanoclaw.yourdomain.com/webhook)',
+    );
+  }
+  const webhookSecret =
+    process.env.TELEGRAM_WEBHOOK_SECRET ||
+    envVars.TELEGRAM_WEBHOOK_SECRET ||
+    '';
+  if (!webhookSecret) {
+    throw new Error(
+      'Telegram: TELEGRAM_WEBHOOK_SECRET not set. ' +
+        'Generate one with: openssl rand -hex 32',
+    );
   }
   return new TelegramChannel(token, opts);
 });

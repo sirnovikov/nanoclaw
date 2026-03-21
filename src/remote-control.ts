@@ -1,4 +1,4 @@
-import { spawn } from 'node:child_process';
+import { spawn, type ChildProcess } from 'node:child_process';
 import fs from 'node:fs';
 import path from 'node:path';
 
@@ -107,17 +107,18 @@ export async function startRemoteControl(
   const stdoutFd = fs.openSync(STDOUT_FILE, 'w');
   const stderrFd = fs.openSync(STDERR_FILE, 'w');
 
-  let proc;
+  let proc: ChildProcess;
   try {
     proc = spawn('claude', ['remote-control', '--name', 'NanoClaw Remote'], {
       cwd,
       stdio: ['ignore', stdoutFd, stderrFd],
       detached: true,
     });
-  } catch (err: any) {
+  } catch (err: unknown) {
     fs.closeSync(stdoutFd);
     fs.closeSync(stderrFd);
-    return { ok: false, error: `Failed to start: ${err.message}` };
+    const message = err instanceof Error ? err.message : String(err);
+    return { ok: false, error: `Failed to start: ${message}` };
   }
 
   // Close FDs in the parent — the child inherited copies
