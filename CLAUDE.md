@@ -29,8 +29,10 @@ Single Node.js process with skill-based channel system. Channels (WhatsApp, Tele
 | `/customize` | Adding channels, integrations, changing behavior |
 | `/debug` | Container issues, logs, troubleshooting |
 | `/update-nanoclaw` | Bring upstream NanoClaw updates into a customized install |
-| `/qodo-pr-resolver` | Fetch and fix Qodo PR review issues interactively or in batch |
-| `/get-qodo-rules` | Load org- and repo-level coding rules from Qodo before code tasks |
+
+## GitHub
+
+This is a fork of `qwibitai/nanoclaw-docker-sandbox`. PRs and `gh` commands MUST target `sirnovikov/nanoclaw` (the fork). Never use `--repo` pointing to upstream. The default is already set via `gh repo set-default`.
 
 ## Development
 
