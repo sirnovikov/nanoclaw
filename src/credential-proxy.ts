@@ -32,6 +32,12 @@ import { insertPermissionRule, logPermissionDecision } from './db.js';
 import { readEnvFile } from './env.js';
 import { logger } from './logger.js';
 import {
+  appendPendingMessage as appendPending,
+  clearPendingProxyMessages as clearPending,
+  loadPendingProxyMessages as loadPending,
+  type PendingProxyMessage,
+} from './pending-messages.js';
+import {
   checkPermissionRule,
   type EgressType,
 } from './permission-rule-engine/rule-engine.js';
@@ -98,46 +104,18 @@ const PENDING_PROXY_MESSAGES_FILE = path.join(
   'pending-proxy-messages.jsonl',
 );
 
-interface PendingProxyMessage {
-  messageId: number;
-  chatJid: string;
-  requestId: string;
-  ts: string;
-}
+export { type PendingProxyMessage } from './pending-messages.js';
 
 function appendPendingMessage(entry: PendingProxyMessage): void {
-  try {
-    fs.mkdirSync(path.dirname(PENDING_PROXY_MESSAGES_FILE), {
-      recursive: true,
-    });
-    fs.appendFileSync(
-      PENDING_PROXY_MESSAGES_FILE,
-      `${JSON.stringify(entry)}\n`,
-      'utf-8',
-    );
-  } catch {
-    // Non-critical — do not let logging failures break the proxy
-  }
+  appendPending(PENDING_PROXY_MESSAGES_FILE, entry);
 }
 
 export function clearPendingProxyMessages(): void {
-  try {
-    fs.writeFileSync(PENDING_PROXY_MESSAGES_FILE, '', 'utf-8');
-  } catch {
-    /* ignore */
-  }
+  clearPending(PENDING_PROXY_MESSAGES_FILE);
 }
 
 export function loadPendingProxyMessages(): PendingProxyMessage[] {
-  try {
-    const content = fs.readFileSync(PENDING_PROXY_MESSAGES_FILE, 'utf-8');
-    return content
-      .split('\n')
-      .filter(Boolean)
-      .map((line) => JSON.parse(line) as PendingProxyMessage);
-  } catch {
-    return [];
-  }
+  return loadPending(PENDING_PROXY_MESSAGES_FILE);
 }
 
 // ---------------------------------------------------------------------------

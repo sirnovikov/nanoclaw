@@ -671,18 +671,16 @@ async function main(): Promise<void> {
       { count: staleMessages.length },
       'Clearing stale permission request keyboards',
     );
-    for (const entry of staleMessages) {
-      const ch = findChannel(channels, entry.chatJid);
-      if (ch) {
-        try {
+    await Promise.allSettled(
+      staleMessages.map(async (entry) => {
+        const ch = findChannel(channels, entry.chatJid);
+        if (ch) {
           await (
             ch as import('./channels/telegram.js').TelegramChannel
           ).clearPermissionKeyboard(entry.chatJid, entry.messageId);
-        } catch {
-          /* non-critical */
         }
-      }
-    }
+      }),
+    );
   }
 
   // Start subsystems (independently of connection handler)
