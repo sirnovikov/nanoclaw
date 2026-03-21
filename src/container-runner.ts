@@ -57,6 +57,8 @@ export interface ContainerOutput {
   result: string | null;
   newSessionId?: string;
   error?: string;
+  /** Tool-use status event — name of tool being called and optional input summary. */
+  toolUse?: { name: string; input?: string };
 }
 
 export interface BridgePermissionDeps {

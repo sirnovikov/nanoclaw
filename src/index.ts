@@ -26,6 +26,7 @@ import {
   writeGroupsSnapshot,
   writeTasksSnapshot,
 } from './container-runner.js';
+import { formatToolStatus } from './format-tool-status.js';
 import {
   cleanupOrphans,
   ensureContainerRuntimeRunning,
@@ -213,13 +214,64 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
     }, IDLE_TIMEOUT);
   };
 
-  await channel.setTyping?.(chatJid, true);
+  // Send ephemeral status message (silent — no notification)
+  let statusMsgId: number | undefined;
+  try {
+    statusMsgId = await channel.sendSilentMessage?.(
+      chatJid,
+      '_Starting container..._',
+    );
+    if (statusMsgId) {
+      logger.info({ group: group.name, statusMsgId }, 'Status message sent');
+    }
+  } catch (err) {
+    logger.warn({ group: group.name, err }, 'Failed to send status message');
+  }
+
   let hadError = false;
   let outputSentToUser = false;
+  let lastStatusEdit = 0;
+  const STATUS_THROTTLE_MS = 2000;
 
   const output = await runAgent(group, prompt, chatJid, async (result) => {
+    // Tool-use status update — edit the ephemeral message
+    if (result.toolUse && statusMsgId && !outputSentToUser) {
+      const now = Date.now();
+      if (now - lastStatusEdit >= STATUS_THROTTLE_MS) {
+        lastStatusEdit = now;
+        const label = formatToolStatus(
+          result.toolUse.name,
+          result.toolUse.input,
+        );
+        logger.debug({ group: group.name, tool: result.toolUse.name }, 'Status update: tool use');
+        await channel.editMessage?.(chatJid, statusMsgId, label);
+      }
+      return;
+    }
+
+    // Session-update marker (result: null, no toolUse) — show "thinking"
+    if (!result.toolUse && !result.result && statusMsgId && !outputSentToUser) {
+      const now = Date.now();
+      if (now - lastStatusEdit >= STATUS_THROTTLE_MS) {
+        lastStatusEdit = now;
+        await channel.editMessage?.(
+          chatJid,
+          statusMsgId,
+          '_Agent thinking..._',
+        );
+      }
+      return;
+    }
+
     // Streaming output callback — called for each agent result
     if (result.result) {
+      // Delete status message before sending real output
+      if (statusMsgId && !outputSentToUser) {
+        logger.info({ group: group.name, statusMsgId }, 'Deleting status message (real output arrived)');
+        await channel.deleteMessage?.(chatJid, statusMsgId);
+        statusMsgId = undefined;
+      }
+
       const raw =
         typeof result.result === 'string'
           ? result.result
@@ -244,7 +296,14 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
     }
   });
 
-  await channel.setTyping?.(chatJid, false);
+  // Cleanup: delete status message if still present (error/no output paths)
+  if (statusMsgId) {
+    try {
+      await channel.deleteMessage?.(chatJid, statusMsgId);
+    } catch {
+      // Non-critical
+    }
+  }
   if (idleTimer) clearTimeout(idleTimer);
 
   if (output === 'error' || hadError) {
@@ -367,6 +426,27 @@ async function runAgent(
   }
 }
 
+// Wakeable delay: sleeps up to `ms` but resolves immediately when woken
+let wakeResolve: (() => void) | null = null;
+
+function wakeMessageLoop(): void {
+  wakeResolve?.();
+}
+
+function wakeableDelay(ms: number): Promise<void> {
+  return new Promise((resolve) => {
+    const timer = setTimeout(() => {
+      wakeResolve = null;
+      resolve();
+    }, ms);
+    wakeResolve = () => {
+      clearTimeout(timer);
+      wakeResolve = null;
+      resolve();
+    };
+  });
+}
+
 async function startMessageLoop(): Promise<void> {
   if (messageLoopRunning) {
     logger.debug('Message loop already running, skipping duplicate start');
@@ -465,7 +545,7 @@ async function startMessageLoop(): Promise<void> {
     } catch (err) {
       logger.error({ err }, 'Error in message loop');
     }
-    await new Promise((resolve) => setTimeout(resolve, POLL_INTERVAL));
+    await wakeableDelay(POLL_INTERVAL);
   }
 }
 
@@ -622,6 +702,7 @@ async function main(): Promise<void> {
         }
       }
       storeMessage(msg);
+      wakeMessageLoop();
     },
     onChatMetadata: (
       chatJid: string,

@@ -61,7 +61,9 @@ describe('pending-messages', () => {
     expect(loaded).toHaveLength(MAX_PENDING_MESSAGES);
     // Should have entries 11..40 (dropped 1..10)
     expect(loaded[0]?.messageId).toBe(11);
-    expect(loaded[loaded.length - 1]?.messageId).toBe(MAX_PENDING_MESSAGES + 10);
+    expect(loaded[loaded.length - 1]?.messageId).toBe(
+      MAX_PENDING_MESSAGES + 10,
+    );
   });
 
   it('clearPendingProxyMessages empties the file', () => {

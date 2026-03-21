@@ -107,6 +107,12 @@ export interface Channel {
     } | null,
     toolInput?: unknown, // MCP tool arguments for display
   ): Promise<number | null>;
+  // Optional: send a silent message (no notification). Returns message ID for later edit/delete.
+  sendSilentMessage?(jid: string, text: string): Promise<number>;
+  // Optional: edit a previously sent message by ID.
+  editMessage?(jid: string, messageId: number, text: string): Promise<void>;
+  // Optional: delete a previously sent message by ID.
+  deleteMessage?(jid: string, messageId: number): Promise<void>;
 }
 
 // Callback type that channels use to deliver inbound messages

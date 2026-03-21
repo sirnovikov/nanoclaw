@@ -129,7 +129,27 @@ export function startWebhookServer(
           }
         });
 
-        opts.handler(req, res);
+        // Wrap handler to catch grammY JSON parse errors (e.g. empty body
+        // from health checks hitting /webhook). Without this, an unhandled
+        // rejection kills the webhook handler permanently.
+        try {
+          const result = opts.handler(req, res) as unknown;
+          if (result instanceof Promise) {
+            result.catch((err: unknown) => {
+              logger.warn({ err }, 'Webhook handler error (caught)');
+              if (!res.headersSent) {
+                res.writeHead(400, { 'content-type': 'text/plain' });
+                res.end('Bad Request');
+              }
+            });
+          }
+        } catch (err) {
+          logger.warn({ err }, 'Webhook handler error (sync)');
+          if (!res.headersSent) {
+            res.writeHead(400, { 'content-type': 'text/plain' });
+            res.end('Bad Request');
+          }
+        }
         return;
       }
 

@@ -35,6 +35,7 @@ interface ContainerOutput {
   result: string | null;
   newSessionId?: string;
   error?: string;
+  toolUse?: { name: string; input?: string };
 }
 
 interface SessionEntry {
@@ -444,6 +445,35 @@ async function runQuery(
 
     if (message.type === 'assistant' && 'uuid' in message) {
       lastAssistantUuid = (message as { uuid: string }).uuid;
+    }
+
+    // Emit tool-use status events for the host to display
+    if (message.type === 'assistant' && 'message' in message) {
+      const msg = message as {
+        message: {
+          content: Array<{
+            type: string;
+            name?: string;
+            input?: Record<string, unknown>;
+          }>;
+        };
+      };
+      for (const block of msg.message.content) {
+        if (block.type === 'tool_use' && block.name) {
+          const inputSummary = block.input
+            ? ((block.input.file_path ??
+                block.input.command ??
+                block.input.pattern ??
+                block.input.query ??
+                block.input.url) as string | undefined)?.slice(0, 120)
+            : undefined;
+          writeOutput({
+            status: 'success',
+            result: null,
+            toolUse: { name: block.name, input: inputSummary },
+          });
+        }
+      }
     }
 
     if (message.type === 'system' && message.subtype === 'init') {
