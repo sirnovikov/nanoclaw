@@ -6,7 +6,13 @@ import { readEnvFile } from './env.js';
 // Read config values from .env (falls back to process.env).
 // Secrets (API keys, tokens) are NOT read here — they are loaded only
 // by the credential proxy (credential-proxy.ts), never exposed to containers.
-const envConfig = readEnvFile(['ASSISTANT_NAME', 'ASSISTANT_HAS_OWN_NUMBER']);
+const envConfig = readEnvFile([
+  'ASSISTANT_NAME',
+  'ASSISTANT_HAS_OWN_NUMBER',
+  'TELEGRAM_WEBHOOK_URL',
+  'TELEGRAM_WEBHOOK_SECRET',
+  'TELEGRAM_WEBHOOK_PORT',
+]);
 
 export const ASSISTANT_NAME =
   process.env.ASSISTANT_NAME || envConfig.ASSISTANT_NAME || 'Andy';
@@ -52,12 +58,13 @@ export const CREDENTIAL_PROXY_PORT = parseInt(
   10,
 );
 export const TELEGRAM_WEBHOOK_PORT = parseInt(
-  process.env.TELEGRAM_WEBHOOK_PORT || '47019',
+  process.env.TELEGRAM_WEBHOOK_PORT || envConfig.TELEGRAM_WEBHOOK_PORT || '47019',
   10,
 );
-export const TELEGRAM_WEBHOOK_URL = process.env.TELEGRAM_WEBHOOK_URL || '';
+export const TELEGRAM_WEBHOOK_URL =
+  process.env.TELEGRAM_WEBHOOK_URL || envConfig.TELEGRAM_WEBHOOK_URL || '';
 export const TELEGRAM_WEBHOOK_SECRET =
-  process.env.TELEGRAM_WEBHOOK_SECRET || '';
+  process.env.TELEGRAM_WEBHOOK_SECRET || envConfig.TELEGRAM_WEBHOOK_SECRET || '';
 export const IPC_POLL_INTERVAL = 1000;
 export const IDLE_TIMEOUT = parseInt(process.env.IDLE_TIMEOUT || '1800000', 10); // 30min default — how long to keep container alive after last result
 export const MAX_CONCURRENT_CONTAINERS = Math.max(
