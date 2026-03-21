@@ -346,10 +346,14 @@ export class TelegramChannel implements Channel {
 
     // Fail fast if webhook config is missing
     if (!TELEGRAM_WEBHOOK_URL) {
-      throw new Error('TELEGRAM_WEBHOOK_URL is empty — cannot register webhook');
+      throw new Error(
+        'TELEGRAM_WEBHOOK_URL is empty — cannot register webhook',
+      );
     }
     if (!TELEGRAM_WEBHOOK_SECRET) {
-      throw new Error('TELEGRAM_WEBHOOK_SECRET is empty — cannot register webhook');
+      throw new Error(
+        'TELEGRAM_WEBHOOK_SECRET is empty — cannot register webhook',
+      );
     }
 
     // Webhook mode: init bot, start HTTP server, register webhook

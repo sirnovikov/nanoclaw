@@ -82,7 +82,9 @@ describe('remote-control', () => {
       // Simulate URL appearing in stdout file on first poll
       stdoutFileContent =
         'Session URL: https://claude.ai/code?bridge=env_abc123\n';
-      vi.spyOn(process, 'kill').mockImplementation((() => true) as typeof process.kill);
+      vi.spyOn(process, 'kill').mockImplementation(
+        (() => true) as typeof process.kill,
+      );
 
       const result = await startRemoteControl('user1', 'tg:123', '/project');
 
@@ -102,7 +104,9 @@ describe('remote-control', () => {
       const proc = createMockProcess();
       spawnMock.mockReturnValue(proc);
       stdoutFileContent = 'https://claude.ai/code?bridge=env_test\n';
-      vi.spyOn(process, 'kill').mockImplementation((() => true) as typeof process.kill);
+      vi.spyOn(process, 'kill').mockImplementation(
+        (() => true) as typeof process.kill,
+      );
 
       await startRemoteControl('user1', 'tg:123', '/project');
 
@@ -118,7 +122,9 @@ describe('remote-control', () => {
       const proc = createMockProcess();
       spawnMock.mockReturnValue(proc);
       stdoutFileContent = 'https://claude.ai/code?bridge=env_test\n';
-      vi.spyOn(process, 'kill').mockImplementation((() => true) as typeof process.kill);
+      vi.spyOn(process, 'kill').mockImplementation(
+        (() => true) as typeof process.kill,
+      );
 
       await startRemoteControl('user1', 'tg:123', '/project');
 
@@ -131,7 +137,9 @@ describe('remote-control', () => {
       const proc = createMockProcess(99999);
       spawnMock.mockReturnValue(proc);
       stdoutFileContent = 'https://claude.ai/code?bridge=env_save\n';
-      vi.spyOn(process, 'kill').mockImplementation((() => true) as typeof process.kill);
+      vi.spyOn(process, 'kill').mockImplementation(
+        (() => true) as typeof process.kill,
+      );
 
       await startRemoteControl('user1', 'tg:123', '/project');
 
@@ -145,7 +153,9 @@ describe('remote-control', () => {
       const proc = createMockProcess();
       spawnMock.mockReturnValue(proc);
       stdoutFileContent = 'https://claude.ai/code?bridge=env_existing\n';
-      vi.spyOn(process, 'kill').mockImplementation((() => true) as typeof process.kill);
+      vi.spyOn(process, 'kill').mockImplementation(
+        (() => true) as typeof process.kill,
+      );
 
       await startRemoteControl('user1', 'tg:123', '/project');
 
@@ -171,7 +181,10 @@ describe('remote-control', () => {
       await startRemoteControl('user1', 'tg:123', '/project');
 
       // Old process (11111) is dead, new process (22222) is alive
-      killSpy.mockImplementation(((pid: number, sig: NodeJS.Signals | number) => {
+      killSpy.mockImplementation(((
+        pid: number,
+        sig: NodeJS.Signals | number,
+      ) => {
         if (pid === 11111 && (sig === 0 || sig === undefined)) {
           throw new Error('ESRCH');
         }
@@ -210,7 +223,9 @@ describe('remote-control', () => {
       const proc = createMockProcess(44444);
       spawnMock.mockReturnValue(proc);
       stdoutFileContent = 'no url here';
-      vi.spyOn(process, 'kill').mockImplementation((() => true) as typeof process.kill);
+      vi.spyOn(process, 'kill').mockImplementation(
+        (() => true) as typeof process.kill,
+      );
 
       const promise = startRemoteControl('user1', 'tg:123', '/project');
 
@@ -285,7 +300,9 @@ describe('remote-control', () => {
         if (p.endsWith('remote-control.json')) return JSON.stringify(session);
         return '';
       }) as typeof fs.readFileSync);
-      vi.spyOn(process, 'kill').mockImplementation((() => true) as typeof process.kill);
+      vi.spyOn(process, 'kill').mockImplementation(
+        (() => true) as typeof process.kill,
+      );
 
       restoreRemoteControl();
 
@@ -374,7 +391,9 @@ describe('remote-control', () => {
         if (p.endsWith('remote-control.json')) return JSON.stringify(session);
         return '';
       }) as typeof fs.readFileSync);
-      vi.spyOn(process, 'kill').mockImplementation((() => true) as typeof process.kill);
+      vi.spyOn(process, 'kill').mockImplementation(
+        (() => true) as typeof process.kill,
+      );
 
       restoreRemoteControl();
 

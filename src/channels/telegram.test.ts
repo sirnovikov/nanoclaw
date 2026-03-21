@@ -1145,9 +1145,7 @@ describe('TelegramChannel', () => {
       const channel = new TelegramChannel('test-token', opts);
       await channel.connect();
 
-      await expect(channel.connect()).rejects.toThrow(
-        'already connected',
-      );
+      await expect(channel.connect()).rejects.toThrow('already connected');
 
       await channel.disconnect();
     });
