@@ -99,13 +99,23 @@ export function startWebhookServer(
       if (method === 'POST' && url === '/webhook') {
         if (shouldValidateIp) {
           const cfIp = req.headers['cf-connecting-ip'];
-          const clientIp = typeof cfIp === 'string' ? cfIp : '';
+          // Take only the first IP if multiple headers were coalesced
+          const clientIp =
+            typeof cfIp === 'string' ? (cfIp.split(',')[0] ?? '').trim() : '';
           if (!clientIp || !isTelegramIp(clientIp)) {
             logger.warn({ clientIp }, 'Webhook request from non-Telegram IP');
             res.writeHead(403, { 'content-type': 'text/plain' });
             res.end('Forbidden');
             return;
           }
+        }
+
+        // Reject non-JSON content types before they reach grammY
+        const contentType = req.headers['content-type'] ?? '';
+        if (contentType && !contentType.includes('application/json')) {
+          res.writeHead(415, { 'content-type': 'text/plain' });
+          res.end('Unsupported Media Type');
+          return;
         }
 
         // Enforce body size limit

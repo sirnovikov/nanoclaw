@@ -224,6 +224,76 @@ describe.skipIf(!canListen)('telegram-webhook', () => {
     expect(result.statusCode).toBe(403);
     expect(handler).not.toHaveBeenCalled();
   });
+
+  it('rejects non-JSON content types with 415', async () => {
+    const handler = vi.fn();
+
+    server = await startWebhookServer({
+      port: 0,
+      validateIp: false,
+      handler,
+    });
+
+    const result = await makeRequest(
+      server.port,
+      {
+        method: 'POST',
+        path: '/webhook',
+        headers: { 'content-type': 'text/xml' },
+      },
+      '<xml>attack</xml>',
+    );
+
+    expect(result.statusCode).toBe(415);
+    expect(handler).not.toHaveBeenCalled();
+  });
+
+  it('accepts requests without content-type header', async () => {
+    const handler = vi.fn((_req: IncomingMessage, res: ServerResponse) => {
+      res.writeHead(200);
+      res.end('ok');
+    });
+
+    server = await startWebhookServer({
+      port: 0,
+      validateIp: false,
+      handler,
+    });
+
+    const result = await makeRequest(
+      server.port,
+      { method: 'POST', path: '/webhook' },
+      '{"update_id":1}',
+    );
+
+    expect(result.statusCode).toBe(200);
+    expect(handler).toHaveBeenCalledOnce();
+  });
+
+  it('uses first IP when multiple cf-connecting-ip headers are coalesced', async () => {
+    const handler = vi.fn();
+
+    server = await startWebhookServer({
+      port: 0,
+      validateIp: true,
+      handler,
+    });
+
+    // Node coalesces duplicate headers into comma-separated string
+    // First IP is non-Telegram, should be rejected
+    const result = await makeRequest(
+      server.port,
+      {
+        method: 'POST',
+        path: '/webhook',
+        headers: { 'cf-connecting-ip': '1.2.3.4, 149.154.167.50' },
+      },
+      '{}',
+    );
+
+    expect(result.statusCode).toBe(403);
+    expect(handler).not.toHaveBeenCalled();
+  });
 });
 
 describe('isTelegramIp', () => {
