@@ -119,7 +119,9 @@ export class TelegramChannel implements Channel {
 
   async connect(): Promise<void> {
     if (this.bot) {
-      throw new Error('TelegramChannel.connect() called while already connected');
+      throw new Error(
+        'TelegramChannel.connect() called while already connected',
+      );
     }
 
     this.bot = new Bot(this.botToken, {
@@ -549,17 +551,17 @@ registerChannel('telegram', (opts: ChannelOpts) => {
   const token =
     process.env.TELEGRAM_BOT_TOKEN || envVars.TELEGRAM_BOT_TOKEN || '';
   if (!token) {
-    logger.warn('Telegram: TELEGRAM_BOT_TOKEN not set');
-    return null;
+    throw new Error(
+      'Telegram: TELEGRAM_BOT_TOKEN not set. Add it to .env.',
+    );
   }
   const webhookUrl =
     process.env.TELEGRAM_WEBHOOK_URL || envVars.TELEGRAM_WEBHOOK_URL || '';
   if (!webhookUrl) {
-    logger.error(
-      'Telegram: TELEGRAM_WEBHOOK_URL not set — cannot start. ' +
-        'Set TELEGRAM_WEBHOOK_URL in .env to your Cloudflare Tunnel URL (e.g. https://nanoclaw-tg.yourdomain.com/webhook)',
+    throw new Error(
+      'Telegram: TELEGRAM_WEBHOOK_URL not set. ' +
+        'Set TELEGRAM_WEBHOOK_URL in .env to your Cloudflare Tunnel URL (e.g. https://nanoclaw.yourdomain.com/webhook)',
     );
-    return null;
   }
   return new TelegramChannel(token, opts);
 });
