@@ -239,11 +239,28 @@ describe('isTelegramIp', () => {
     expect(isTelegramIp('91.108.7.255')).toBe(true);
   });
 
+  it('accepts IPs in additional Telegram ranges', () => {
+    expect(isTelegramIp('91.108.8.1')).toBe(true);
+    expect(isTelegramIp('91.108.12.1')).toBe(true);
+    expect(isTelegramIp('91.108.16.1')).toBe(true);
+    expect(isTelegramIp('91.108.20.1')).toBe(true);
+  });
+
   it('rejects IPs outside Telegram ranges', () => {
     expect(isTelegramIp('1.2.3.4')).toBe(false);
     expect(isTelegramIp('149.154.159.255')).toBe(false);
     expect(isTelegramIp('149.154.176.0')).toBe(false);
     expect(isTelegramIp('91.108.3.255')).toBe(false);
-    expect(isTelegramIp('91.108.8.0')).toBe(false);
+    expect(isTelegramIp('91.108.24.0')).toBe(false);
+  });
+
+  it('handles IPv4-mapped IPv6 addresses', () => {
+    expect(isTelegramIp('::ffff:149.154.167.50')).toBe(true);
+    expect(isTelegramIp('::ffff:1.2.3.4')).toBe(false);
+  });
+
+  it('rejects pure IPv6 addresses', () => {
+    expect(isTelegramIp('2001:db8::1')).toBe(false);
+    expect(isTelegramIp('::1')).toBe(false);
   });
 });

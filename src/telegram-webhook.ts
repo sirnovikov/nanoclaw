@@ -6,8 +6,11 @@
  *   GET  /health   — returns 200 "ok"
  *   *              — returns 404
  *
- * Security: POST /webhook only accepts requests from Telegram's published
- * IP ranges (validated via Cf-Connecting-Ip header from Cloudflare Tunnel).
+ * Security:
+ *   - POST /webhook only accepts requests from Telegram's published
+ *     IP ranges (validated via Cf-Connecting-Ip header from Cloudflare Tunnel)
+ *   - Request body capped at 1 MB to prevent memory exhaustion
+ *   - Request/header timeouts to mitigate Slowloris
  */
 
 import {
@@ -36,6 +39,9 @@ export interface WebhookServer {
   stop: () => Promise<void>;
 }
 
+/** Max request body size (1 MB — Telegram updates are typically <100 KB). */
+const MAX_BODY_BYTES = 1_048_576;
+
 /**
  * Telegram's published IP ranges for webhook requests.
  * https://core.telegram.org/bots/webhooks#the-short-version
@@ -43,6 +49,10 @@ export interface WebhookServer {
 const TELEGRAM_CIDRS = [
   { base: ipToInt('149.154.160.0'), mask: 20 },
   { base: ipToInt('91.108.4.0'), mask: 22 },
+  { base: ipToInt('91.108.8.0'), mask: 22 },
+  { base: ipToInt('91.108.12.0'), mask: 22 },
+  { base: ipToInt('91.108.16.0'), mask: 22 },
+  { base: ipToInt('91.108.20.0'), mask: 22 },
 ];
 
 function ipToInt(ip: string): number {
@@ -57,7 +67,13 @@ function ipToInt(ip: string): number {
 }
 
 export function isTelegramIp(ip: string): boolean {
-  const addr = ipToInt(ip);
+  // Strip IPv4-mapped IPv6 prefix (::ffff:1.2.3.4 → 1.2.3.4)
+  const normalized = ip.startsWith('::ffff:') ? ip.slice(7) : ip;
+
+  // Reject pure IPv6 — Telegram's webhook ranges are IPv4-only
+  if (normalized.includes(':')) return false;
+
+  const addr = ipToInt(normalized);
   return TELEGRAM_CIDRS.some(({ base, mask }) => {
     const maskBits = (~0 << (32 - mask)) >>> 0;
     return (addr & maskBits) === (base & maskBits);
@@ -91,6 +107,18 @@ export function startWebhookServer(
             return;
           }
         }
+
+        // Enforce body size limit
+        let bodyBytes = 0;
+        req.on('data', (chunk: Buffer) => {
+          bodyBytes += chunk.length;
+          if (bodyBytes > MAX_BODY_BYTES) {
+            req.destroy();
+            res.writeHead(413, { 'content-type': 'text/plain' });
+            res.end('Payload Too Large');
+          }
+        });
+
         opts.handler(req, res);
         return;
       }
@@ -98,6 +126,10 @@ export function startWebhookServer(
       res.writeHead(404, { 'content-type': 'text/plain' });
       res.end('Not Found');
     });
+
+    // Mitigate Slowloris: timeout slow headers and idle connections
+    server.headersTimeout = 15_000;
+    server.requestTimeout = 30_000;
 
     server.listen(opts.port, host, () => {
       const address = server.address();

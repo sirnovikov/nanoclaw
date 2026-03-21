@@ -551,9 +551,7 @@ registerChannel('telegram', (opts: ChannelOpts) => {
   const token =
     process.env.TELEGRAM_BOT_TOKEN || envVars.TELEGRAM_BOT_TOKEN || '';
   if (!token) {
-    throw new Error(
-      'Telegram: TELEGRAM_BOT_TOKEN not set. Add it to .env.',
-    );
+    throw new Error('Telegram: TELEGRAM_BOT_TOKEN not set. Add it to .env.');
   }
   const webhookUrl =
     process.env.TELEGRAM_WEBHOOK_URL || envVars.TELEGRAM_WEBHOOK_URL || '';
@@ -561,6 +559,16 @@ registerChannel('telegram', (opts: ChannelOpts) => {
     throw new Error(
       'Telegram: TELEGRAM_WEBHOOK_URL not set. ' +
         'Set TELEGRAM_WEBHOOK_URL in .env to your Cloudflare Tunnel URL (e.g. https://nanoclaw.yourdomain.com/webhook)',
+    );
+  }
+  const webhookSecret =
+    process.env.TELEGRAM_WEBHOOK_SECRET ||
+    envVars.TELEGRAM_WEBHOOK_SECRET ||
+    '';
+  if (!webhookSecret) {
+    throw new Error(
+      'Telegram: TELEGRAM_WEBHOOK_SECRET not set. ' +
+        'Generate one with: openssl rand -hex 32',
     );
   }
   return new TelegramChannel(token, opts);
