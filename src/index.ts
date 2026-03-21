@@ -243,7 +243,10 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
           result.toolUse.name,
           result.toolUse.input,
         );
-        logger.debug({ group: group.name, tool: result.toolUse.name }, 'Status update: tool use');
+        logger.debug(
+          { group: group.name, tool: result.toolUse.name },
+          'Status update: tool use',
+        );
         await channel.editMessage?.(chatJid, statusMsgId, label);
       }
       return;
@@ -267,7 +270,10 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
     if (result.result) {
       // Delete status message before sending real output
       if (statusMsgId && !outputSentToUser) {
-        logger.info({ group: group.name, statusMsgId }, 'Deleting status message (real output arrived)');
+        logger.info(
+          { group: group.name, statusMsgId },
+          'Deleting status message (real output arrived)',
+        );
         await channel.deleteMessage?.(chatJid, statusMsgId);
         statusMsgId = undefined;
       }
