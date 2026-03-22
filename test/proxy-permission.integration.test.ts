@@ -143,7 +143,9 @@ describe('proxy permission integration', () => {
 
   it('always tap calls insertPermissionRule with the proposal', async () => {
     const proposal = {
-      pattern: '*.example.com:443',
+      name: 'example.com HTTPS',
+      patterns: ['*.example.com:443'],
+      effect: 'allow' as const,
       scope: 'global' as const,
       description: 'Allow example.com HTTPS',
     };
@@ -172,7 +174,7 @@ describe('proxy permission integration', () => {
     expect(insertPermissionRule).toHaveBeenCalledOnce();
     expect(insertPermissionRule).toHaveBeenCalledWith(
       expect.objectContaining({
-        pattern: proposal.pattern,
+        pattern: proposal.patterns[0],
         effect: 'allow',
         egress_type: 'connect',
         source: 'telegram',
@@ -182,7 +184,9 @@ describe('proxy permission integration', () => {
 
   it('always tap with group-scoped proposal sets group_folder', async () => {
     const proposal = {
-      pattern: '*.internal.com:443',
+      name: 'internal.com HTTPS',
+      patterns: ['*.internal.com:443'],
+      effect: 'allow' as const,
       scope: 'group' as const,
       description: 'Allow internal for this group',
     };
@@ -217,7 +221,9 @@ describe('proxy permission integration', () => {
 
   it('once tap does not call insertPermissionRule even with proposal', async () => {
     const proposal = {
-      pattern: '*.example.com:443',
+      name: 'example.com HTTPS',
+      patterns: ['*.example.com:443'],
+      effect: 'allow' as const,
       scope: 'global' as const,
       description: 'Allow example.com HTTPS',
     };
