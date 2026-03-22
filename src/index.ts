@@ -26,7 +26,7 @@ import {
   writeGroupsSnapshot,
   writeTasksSnapshot,
 } from './container-runner.js';
-import { formatToolStatus } from './format-tool-status.js';
+import { resolveStatusAction } from './status-message.js';
 import {
   cleanupOrphans,
   ensureContainerRuntimeRunning,
@@ -150,6 +150,9 @@ export function _setRegisteredGroups(
   registeredGroups = groups;
 }
 
+/** Per-group ephemeral status message ID — shared between processGroupMessages and piped path. */
+const activeStatusMsg = new Map<string, number>();
+
 /**
  * Process all pending messages for a group.
  * Called by the GroupQueue when it's this group's turn.
@@ -215,6 +218,13 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
   };
 
   // Send ephemeral status message (silent — no notification)
+  // Delete any stale status message from the piped path first
+  const staleStatusId = activeStatusMsg.get(chatJid);
+  if (staleStatusId) {
+    await channel.deleteMessage?.(chatJid, staleStatusId);
+    activeStatusMsg.delete(chatJid);
+  }
+
   let statusMsgId: number | undefined;
   try {
     statusMsgId = await channel.sendSilentMessage?.(
@@ -222,6 +232,7 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
       '_Starting container..._',
     );
     if (statusMsgId) {
+      activeStatusMsg.set(chatJid, statusMsgId);
       logger.info({ group: group.name, statusMsgId }, 'Status message sent');
     }
   } catch (err) {
@@ -234,50 +245,36 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
   const STATUS_THROTTLE_MS = 2000;
 
   const output = await runAgent(group, prompt, chatJid, async (result) => {
-    // Tool-use status update — edit the ephemeral message
-    if (result.toolUse && statusMsgId && !outputSentToUser) {
-      const now = Date.now();
-      if (now - lastStatusEdit >= STATUS_THROTTLE_MS) {
-        lastStatusEdit = now;
-        const label = formatToolStatus(
-          result.toolUse.name,
-          result.toolUse.input,
-        );
-        logger.debug(
-          { group: group.name, tool: result.toolUse.name },
-          'Status update: tool use',
-        );
-        await channel.editMessage?.(chatJid, statusMsgId, label);
-      }
+    // Resolve what to do with the status message
+    const action = resolveStatusAction(
+      {
+        statusMsgId,
+        pipedStatusId: activeStatusMsg.get(chatJid),
+        outputSentToUser,
+        lastStatusEdit,
+        now: Date.now(),
+        throttleMs: STATUS_THROTTLE_MS,
+      },
+      result,
+    );
+
+    if (action.type === 'edit') {
+      lastStatusEdit = Date.now();
+      await channel.editMessage?.(chatJid, action.messageId, action.text);
       return;
     }
 
-    // Session-update marker (result: null, no toolUse) — show "thinking"
-    if (!result.toolUse && !result.result && statusMsgId && !outputSentToUser) {
-      const now = Date.now();
-      if (now - lastStatusEdit >= STATUS_THROTTLE_MS) {
-        lastStatusEdit = now;
-        await channel.editMessage?.(
-          chatJid,
-          statusMsgId,
-          '_Agent thinking..._',
-        );
+    if (action.type === 'delete') {
+      for (const id of action.messageIds) {
+        await channel.deleteMessage?.(chatJid, id);
+        if (id === statusMsgId) statusMsgId = undefined;
+        if (id === activeStatusMsg.get(chatJid))
+          activeStatusMsg.delete(chatJid);
       }
-      return;
     }
 
-    // Streaming output callback — called for each agent result
+    // Streaming output — send to user
     if (result.result) {
-      // Delete status message before sending real output
-      if (statusMsgId && !outputSentToUser) {
-        logger.info(
-          { group: group.name, statusMsgId },
-          'Deleting status message (real output arrived)',
-        );
-        await channel.deleteMessage?.(chatJid, statusMsgId);
-        statusMsgId = undefined;
-      }
-
       const raw =
         typeof result.result === 'string'
           ? result.result
@@ -306,6 +303,7 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
   if (statusMsgId) {
     try {
       await channel.deleteMessage?.(chatJid, statusMsgId);
+      activeStatusMsg.delete(chatJid);
     } catch {
       // Non-critical
     }
@@ -536,11 +534,17 @@ async function startMessageLoop(): Promise<void> {
             lastAgentTimestamp[chatJid] =
               lastToSend?.timestamp ?? lastAgentTimestamp[chatJid] ?? '';
             saveState();
-            // Show typing indicator while the container processes the piped message
+            // Show ephemeral status message for piped messages
             channel
-              .setTyping?.(chatJid, true)
-              ?.catch((err) =>
-                logger.warn({ chatJid, err }, 'Failed to set typing indicator'),
+              .sendSilentMessage?.(chatJid, '_Agent thinking..._')
+              .then((msgId) => {
+                if (msgId) activeStatusMsg.set(chatJid, msgId);
+              })
+              .catch((err) =>
+                logger.warn(
+                  { chatJid, err },
+                  'Failed to send piped status message',
+                ),
               );
           } else {
             // No active container — enqueue for a new one
@@ -682,8 +686,26 @@ async function main(): Promise<void> {
   // Channel callbacks (shared by all channels)
   const channelOpts = {
     onMessage: (chatJid: string, msg: NewMessage) => {
-      // Remote control commands — intercept before storage
+      // Host slash commands — intercept before storage
       const trimmed = msg.content.trim();
+
+      if (trimmed === '/restart') {
+        const group = registeredGroups[chatJid];
+        if (!group?.isMain) return; // Only main group can restart
+        const channel = findChannel(channels, chatJid);
+        const killed = queue.killContainer(chatJid);
+        const reply = killed
+          ? '_Container restarted. Send a message to start a fresh one._'
+          : '_No active container to restart._';
+        channel
+          ?.sendMessage(chatJid, reply)
+          .catch((err) =>
+            logger.error({ err, chatJid }, 'Failed to send /restart reply'),
+          );
+        return;
+      }
+
+      // Remote control commands
       if (trimmed === '/remote-control' || trimmed === '/remote-control-end') {
         handleRemoteControl(trimmed, chatJid, msg).catch((err) =>
           logger.error({ err, chatJid }, 'Remote control command error'),

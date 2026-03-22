@@ -1,4 +1,5 @@
 import type { ChildProcess } from 'node:child_process';
+import { execSync } from 'node:child_process';
 import fs from 'node:fs';
 import path from 'node:path';
 
@@ -190,6 +191,29 @@ export class GroupQueue {
       fs.writeFileSync(path.join(inputDir, '_close'), '');
     } catch {
       // ignore
+    }
+  }
+
+  /**
+   * Kill the active container for a group. Returns true if a container was killed.
+   */
+  killContainer(groupJid: string): boolean {
+    const state = this.groups.get(groupJid);
+    if (!state?.containerName || !state.active) return false;
+
+    try {
+      execSync(`docker kill ${state.containerName}`, { stdio: 'ignore' });
+      logger.info(
+        { groupJid, container: state.containerName },
+        'Container killed via /restart',
+      );
+      return true;
+    } catch {
+      logger.warn(
+        { groupJid, container: state.containerName },
+        'Failed to kill container',
+      );
+      return false;
     }
   }
 

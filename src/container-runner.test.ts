@@ -245,7 +245,7 @@ describe('container-runner spawn args (always locked down)', () => {
     const args = await spawnArgsFor(group);
     const addHostIdx = args.indexOf('--add-host');
     expect(addHostIdx).not.toBe(-1);
-    expect(args[addHostIdx + 1]).toBe('host.docker.internal:host-gateway');
+    expect(args[addHostIdx + 1]).toBe('host.docker.internal:172.20.0.1');
   });
 
   it('NO_PROXY is localhost,127.0.0.1,host.docker.internal', async () => {

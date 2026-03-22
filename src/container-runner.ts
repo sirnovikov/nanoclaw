@@ -24,6 +24,7 @@ import {
 import {
   CONTAINER_HOST_GATEWAY,
   CONTAINER_RUNTIME_BIN,
+  getProxyBridgeIp,
   hostGatewayArgs,
   readonlyMountArgs,
   stopContainer,
@@ -361,22 +362,19 @@ function buildContainerArgs(
     `ANTHROPIC_BASE_URL=http://${CONTAINER_HOST_GATEWAY}:${CREDENTIAL_PROXY_PORT}`,
   );
 
-  // Network isolation: attach to the nanoclaw-proxy bridge and route all
-  // HTTP/HTTPS through the credential proxy.
+  // Network isolation: attach to the nanoclaw-proxy --internal bridge.
+  // --internal blocks all routing outside the bridge subnet, so containers
+  // cannot reach the internet even if they ignore HTTP_PROXY settings.
   //
-  // Network isolation strategy is platform-specific (see scripts/):
-  //   macOS: iptables rules injected into the Docker Desktop VM via a
-  //          privileged container block FORWARD chain traffic from this bridge
-  //          to the internet, while preserving the host.docker.internal tunnel
-  //          (which Docker Desktop handles outside iptables).
-  //   Linux: the nanoclaw-proxy network uses --internal, so no default route
-  //          exists outside the bridge subnet.
-  //
-  // 'host-gateway' resolves to the host IP as seen by the Docker runtime
-  // (on macOS: the Mac host via Docker Desktop's tunnel; on Linux: the bridge
-  // gateway). This makes host.docker.internal reachable on both platforms.
+  // host.docker.internal is mapped to the bridge gateway IP (e.g. 172.20.0.1)
+  // instead of 'host-gateway'. On Docker Desktop macOS, 'host-gateway' resolves
+  // to an IP outside the bridge subnet which is unreachable on --internal
+  // networks. The bridge gateway IS within the subnet and routes to the host,
+  // so the credential proxy remains reachable.
   args.push('--network', 'nanoclaw-proxy');
-  args.push('--add-host', 'host.docker.internal:host-gateway');
+  const bridgeIp = getProxyBridgeIp();
+  const hostEntry = bridgeIp ?? 'host-gateway';
+  args.push('--add-host', `host.docker.internal:${hostEntry}`);
   const proxyUrl = `http://${CONTAINER_HOST_GATEWAY}:${CREDENTIAL_PROXY_PORT}`;
   args.push('-e', `HTTP_PROXY=${proxyUrl}`);
   args.push('-e', `HTTPS_PROXY=${proxyUrl}`);
